@@ -1,0 +1,15 @@
+# .gitmodules.template - Phase 1 占位
+#
+# 用法：用户在 GitHub 上 fork sdyckjq-lab/llm-wiki-skill 后，
+#       把此文件复制为 .gitmodules 并将 url 改为自己 fork 的地址，然后：
+#
+#   cp .gitmodules.template .gitmodules
+#   # 编辑 .gitmodules，把 url 改为你的 fork URL
+#   git submodule update --init --recursive
+#
+# 当前未启用（Phase 3 完成后启用）。
+
+[submodule "compile/llm-wiki-skill"]
+	path = compile/llm-wiki-skill
+	url = https://github.com/<YOUR_GITHUB_USERNAME>/llm-wiki-skill.git
+	branch = main

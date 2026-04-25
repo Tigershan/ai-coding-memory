@@ -1,0 +1,34 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ---- Project specific ----
+# 用户数据目录由运行时生成，不入库
+# （实际数据在 ~/.ai-memory/，此处仅防止误把本地测试数据入库）
+.local-data/
+*.log
+.compile-errors.log
+errors.log
+
+# ---- Submodule build artifacts ----
+compile/llm-wiki-skill/wiki/
+compile/llm-wiki-skill/.cache/
+
+# ---- Secrets ----
+.env
+.env.local
+config/domain-mapping.yml      # 用户私有配置不入库（example 入库即可）

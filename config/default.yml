@@ -1,0 +1,45 @@
+# ai-coding-memory 默认配置
+# 用户配置位于 ~/.ai-memory/config/，本文件作为默认值
+
+# ==== 数据目录 ====
+data_root: ~/.ai-memory
+
+# ==== 采集配置 ====
+collect:
+  # 启用的 IDE（可关闭未使用的，加速采集）
+  enabled_ides:
+    - aone-copilot
+    - cursor
+    - qoder
+  # 单个 session 最大字符数（超出会触发 MapReduce 分片）
+  max_chars_per_session: 80000
+
+# ==== 清洗配置 ====
+distill:
+  # LLM 调用模式（目前仅支持 ide_llm，复用当前 IDE 的 LLM 能力）
+  llm_mode: ide_llm
+  # 单个 step 失败重试次数
+  max_retries: 2
+  # 主题切分：低于此 estimated_value 的 topic 直接丢弃
+  drop_threshold: noise   # noise | low | medium
+  # 分层标注兜底：confidence 低于此值时归入 general
+  scope_confidence_threshold: 0.6
+
+# ==== 编译配置 ====
+compile:
+  # llm-wiki-skill submodule 路径（相对项目根）
+  llm_wiki_path: compile/llm-wiki-skill
+  # 子知识库未初始化时是否自动 init
+  auto_init_subwiki: true
+
+# ==== MCP Server 配置 ====
+mcp_server:
+  # 召回返回的 Top K 结果数
+  top_k: 5
+  # 性能预算（毫秒），超出会记录 warning
+  performance_budget_ms: 1000
+
+# ==== 日志 ====
+logging:
+  level: INFO    # DEBUG | INFO | WARN | ERROR
+  log_dir: ~/.ai-memory/logs

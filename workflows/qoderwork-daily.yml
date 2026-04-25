@@ -1,0 +1,53 @@
+# QoderWork 每日定时任务模板（Phase 5 完成后启用）
+#
+# 用途：每日 22:00 自动跑完整 pipeline，把当日对话沉淀到知识库。
+#
+# 安装：在 QoderWork 中导入此 yml 文件即可。
+#
+# 当前状态：占位（待 Phase 5 实现 QoderWork 适配）
+
+name: ai-coding-memory-daily
+description: 每日 22:00 自动采集 + 清洗 + 入库 AI 编码对话
+schedule: "0 22 * * *"   # 每天 22:00（cron 表达式）
+
+steps:
+  - name: collect
+    description: 采集今日所有 IDE 对话
+    command: python3
+    args:
+      - ${PROJECT_ROOT}/collect/scripts/extract_sessions.py
+      - --range
+      - today
+      - --verbose
+    timeout_seconds: 60
+    on_failure: stop
+
+  - name: distill
+    description: 清洗为分层 topic 文件
+    command: python3
+    args:
+      - ${PROJECT_ROOT}/distill/scripts/distill.py
+      - --date
+      - today
+      - --verbose
+    timeout_seconds: 600   # LLM 调用较慢，给 10 分钟
+    on_failure: continue   # distill 失败不阻塞 compile（compile 可处理之前的 topics）
+
+  - name: compile
+    description: 入库到 llm-wiki 知识库
+    command: bash
+    args:
+      - ${PROJECT_ROOT}/compile/scripts/crystallize_topics.sh
+      - today
+    timeout_seconds: 1200  # crystallize 是 LLM 密集型，给 20 分钟
+    on_failure: stop
+
+env:
+  PROJECT_ROOT: ${HOME}/ai-coding-memory   # 用户安装位置（按需调整）
+
+notifications:
+  on_success:
+    - log: ${HOME}/.ai-memory/logs/daily-success.log
+  on_failure:
+    - log: ${HOME}/.ai-memory/logs/daily-failure.log
+    # - email: your-email@example.com   # 可选
