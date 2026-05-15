@@ -187,6 +187,9 @@ project: winterfell
 domain: null
 general_category: null
 tags: [rate-limit, redis]
+knowledge_type: decision
+bug_category: null
+correction_count: 1
 quality:
   has_conclusion: true
   has_code: true
@@ -196,9 +199,39 @@ source_msg_range: [10, 22]
 
 # 限流方案选型与 Redis lua 脚本优化
 
-## 背景
-（指代消解后的完整自描述对话）
+## 💡 决策推理链
+（备选方案、最终选择及理由、否决理由）
+
+## ⚡ 用户纠正记录
+（AI 犯错 → 用户纠正 → 正确答案）
+
+## 对话（已消解指代）
+（指代消解后的完整自描述对话，纠正处有 ⚡ CORRECTION 标记）
+
+## 关键代码
+（保留的 decision/educational 代码，附 reusable_pattern 标签）
+
+## 已丢弃过程性代码
+（丢弃方案 → 失败原因）
 ```
+
+**新增字段说明**：
+
+| 字段 | 类型 | 来源 | 说明 |
+|---|---|---|---|
+| `knowledge_type` | enum | Step 1 | 知识类型：decision / bugfix / tribal_knowledge / new_learning / implementation / qa |
+| `bug_category` | enum \| null | Step 4 | 仅 bugfix 类填写：concurrency / config / null-handling / api-misuse / performance 等 |
+| `correction_count` | int | Step 1 + Step 2 | 用户纠正 AI 的次数，0 表示无纠正 |
+
+**新增正文段落**：
+
+| 段落 | 来源 | 说明 |
+|---|---|---|
+| `## 💡 决策推理链` | Step 1 decision_rationale | 仅 knowledge_type=decision 时生成 |
+| `## ⚡ 用户纠正记录` | Step 1 corrections | 仅 correction_count > 0 时生成 |
+| `> ⚡ CORRECTION:` 标记 | Step 2 coreference | 在对话正文中标记纠正发生位置 |
+| `reusable_pattern` 标签 | Step 3 code_filter | 附在关键代码标题后，如 `pattern:distributed-rate-limiting` |
+| 失败原因增强 | Step 3 discarded_summary | 丢弃的代码必须说明"为什么失败/被放弃" |
 
 ### 5.3 四个 Prompt 的完整设计
 

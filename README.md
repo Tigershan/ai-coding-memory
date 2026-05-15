@@ -56,11 +56,14 @@ cd ~/ai-coding-memory
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
-| `collect/` | ✅ Phase 1 | 复用 `daily-coding-summary` 的提取逻辑 |
-| `distill/` | 🚧 Phase 2 | 主题切分 + 指代消解 + 代码筛选 + 分层标注 |
-| `compile/` | 🚧 Phase 3 | 包装 fork 的 llm-wiki-skill |
-| `mcp-server/` | 🚧 Phase 4 | FastMCP 实现 |
-| `workflows/` | 🚧 Phase 5 | QoderWork 定时任务 |
+| `collect/` | ✅ | 复用 `daily-coding-summary` 的提取逻辑 |
+| `distill/` | ✅ | 4 步流水线（切分 + 指代消解 + 代码筛选 + 分层标注），Agent 编排模式 |
+| `compile/` | ✅ | 包装 fork 的 llm-wiki-skill；route + ingest 双阶段 |
+| `mcp-server/` | ✅ | FastMCP 实现，scope 自动按 workspace 路由 |
+| `workflows/` | ✅ | `manual-trigger.sh` + `qoderwork-daily.yml` |
+
+> 2026-04-25 已端到端跑通：5 sessions → 5 topic → 4 子库（5 source + 11 entity） → 召回测试 9 查询命中 8（88%）。
+> 详细安装与定时任务部署见 [`docs/install-and-schedule.md`](docs/install-and-schedule.md)。
 
 ## 设计原则（Harness Engineering）
 

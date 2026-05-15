@@ -6,14 +6,16 @@
     清洗噪声、过滤闲聊、智能截断后写入 raw/sessions/YYYY-MM-DD.json。
 
 输入：
-    --range  today | yesterday      时间范围（默认 today）
-    --ide    cursor | qoder | aone-copilot | all   IDE（默认 all）
-    --output 自定义输出路径（默认 ~/.ai-memory/raw/sessions/<date>.json）
+    --range  时间范围，支持以下格式（默认 today）：
+             today | yesterday | YYYY-MM-DD | YYYY-MM-DD~YYYY-MM-DD | last-7d | last-30d
+    --ide    cursor | qoder | aone-copilot | claude-code | all   IDE（默认 all）
+    --output 自定义输出路径（仅单日模式生效，多日模式按天分文件）
     --dry-run  不写文件，仅打印统计
     --verbose  详细日志
 
 输出：
     JSON 文件，结构见本项目 docs/design.md 5.2 节"输入契约"。
+    多日范围时按天分文件输出（每天一个 YYYY-MM-DD.json），保证下游 distill 兼容。
 
 失败模式：
     - 单个 IDE 数据库/索引缺失 → 跳过，warning 记录到输出
@@ -33,17 +35,22 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.paths import (  # noqa: E402
     AONE_COPILOT_KV_DIR,
+    CLAUDE_CODE_PROJECTS_DIR,
     IDE_DB_PATHS,
     RAW_SESSIONS_DIR,
     ensure_data_dirs,
 )
-from lib.time_range import compute_time_range, date_label_for_filename  # noqa: E402
+from lib.time_range import (  # noqa: E402
+    compute_time_range,
+    date_label_for_filename,
+    enumerate_dates,
+)
 from lib.cleaners import MAPREDUCE_THRESHOLD  # noqa: E402
 from lib.cursor_extractor import extract_vscode_sessions  # noqa: E402
 from lib.aone_extractor import extract_aone_copilot_sessions  # noqa: E402
+from lib.claude_extractor import extract_claude_code_sessions  # noqa: E402
 
-ALL_IDES = ("cursor", "qoder", "aone-copilot")
-
+ALL_IDES = ("cursor", "qoder", "aone-copilot", "claude-code")
 
 def collect_for_ide(
     ide: str,
@@ -60,6 +67,10 @@ def collect_for_ide(
         sessions, warnings = extract_aone_copilot_sessions(
             AONE_COPILOT_KV_DIR, start_ms, end_ms
         )
+    elif ide == "claude-code":
+        sessions, warnings = extract_claude_code_sessions(
+            CLAUDE_CODE_PROJECTS_DIR, start_ms, end_ms
+        )
     else:
         return [], [f"未知 IDE: {ide}"]
 
@@ -67,7 +78,6 @@ def collect_for_ide(
         print(f"[{ide}] sessions={len(sessions)} warnings={len(warnings)}",
               file=sys.stderr)
     return sessions, warnings
-
 
 def build_output(
     time_range: dict,
@@ -107,18 +117,55 @@ def build_output(
         "warnings": warnings,
     }
 
+def _collect_single_day(
+    date_str: str,
+    target_ides: list[str],
+    verbose: bool,
+    dry_run: bool,
+    output_path: Path | None = None,
+) -> dict:
+    """采集单天数据并写入文件，返回 stats dict"""
+    time_range = compute_time_range(date_str)
+
+    all_sessions: list[dict] = []
+    all_warnings: list[str] = []
+    for ide in target_ides:
+        sessions, warnings = collect_for_ide(
+            ide, time_range["start_ms"], time_range["end_ms"], verbose
+        )
+        all_sessions.extend(sessions)
+        all_warnings.extend(warnings)
+
+    output = build_output(time_range, all_sessions, all_warnings, target_ides)
+
+    if dry_run:
+        return output["stats"]
+
+    out_path = output_path or (RAW_SESSIONS_DIR / f"{date_str}.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+    return {
+        "output": str(out_path),
+        "stats": output["stats"],
+        "warnings_count": len(all_warnings),
+    }
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="ai-coding-memory: collect stage")
-    parser.add_argument("--range", choices=["today", "yesterday"], default="today")
+    parser.add_argument(
+        "--range", default="today",
+        help="时间范围：today | yesterday | YYYY-MM-DD | YYYY-MM-DD~YYYY-MM-DD | last-7d | last-30d",
+    )
     parser.add_argument(
         "--ide",
         choices=[*ALL_IDES, "all"],
         default="all",
-        help="目标 IDE，'all' 表示三个都跑",
+        help="目标 IDE，'all' 表示全部都跑",
     )
     parser.add_argument("--output", type=Path, default=None,
-                        help="自定义输出路径")
+                        help="自定义输出路径（仅单日模式生效）")
     parser.add_argument("--dry-run", action="store_true",
                         help="不写文件，仅打印统计")
     parser.add_argument("--verbose", action="store_true",
@@ -127,41 +174,48 @@ def main() -> int:
 
     ensure_data_dirs()
 
-    time_range = compute_time_range(args.range)
     target_ides = list(ALL_IDES) if args.ide == "all" else [args.ide]
+    dates = enumerate_dates(args.range)
 
-    all_sessions: list[dict] = []
-    all_warnings: list[str] = []
-    for ide in target_ides:
-        sessions, warnings = collect_for_ide(
-            ide, time_range["start_ms"], time_range["end_ms"], args.verbose
+    if args.verbose:
+        print(f"[collect] range={args.range} → {len(dates)} day(s): {dates}",
+              file=sys.stderr)
+
+    # 单日模式：保持向后兼容的输出格式
+    if len(dates) == 1:
+        result = _collect_single_day(
+            dates[0], target_ides, args.verbose, args.dry_run, args.output,
         )
-        all_sessions.extend(sessions)
-        all_warnings.extend(warnings)
-
-    output = build_output(time_range, all_sessions, all_warnings, target_ides)
-
-    if args.dry_run:
-        print(json.dumps(output["stats"], ensure_ascii=False, indent=2))
-        if args.verbose:
-            for w in all_warnings:
-                print(f"[WARN] {w}", file=sys.stderr)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    out_path = args.output or (
-        RAW_SESSIONS_DIR / f"{date_label_for_filename(args.range)}.json"
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
+    # 多日模式：按天分文件输出
+    all_results = []
+    total_sessions = 0
+    total_warnings = 0
+    for date_str in dates:
+        if args.verbose:
+            print(f"[collect] processing {date_str}...", file=sys.stderr)
+        result = _collect_single_day(
+            date_str, target_ides, args.verbose, args.dry_run,
+        )
+        stats = result.get("stats", result) if isinstance(result, dict) else result
+        day_sessions = stats.get("totalSessions", 0)
+        total_sessions += day_sessions
+        total_warnings += result.get("warnings_count", 0) if isinstance(result, dict) else 0
+        all_results.append({"date": date_str, **result})
+        if args.verbose:
+            print(f"[collect] {date_str}: {day_sessions} sessions", file=sys.stderr)
 
-    print(json.dumps({
-        "output": str(out_path),
-        "stats": output["stats"],
-        "warnings_count": len(all_warnings),
-    }, ensure_ascii=False, indent=2))
+    summary = {
+        "range": args.range,
+        "days": len(dates),
+        "totalSessions": total_sessions,
+        "totalWarnings": total_warnings,
+        "daily": all_results,
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

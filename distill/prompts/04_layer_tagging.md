@@ -34,6 +34,20 @@ domain_mapping:
 topic_content:
 {topic_md_full}
 
+【bug_category 标注（仅当 topic 的 knowledge_type=bugfix 时填写）】
+如果该 topic 是一个 bug 修复过程，请判定 bug 的根因类别：
+- **concurrency**: 并发/竞态条件/死锁/线程安全
+- **serialization**: 序列化/反序列化/编解码问题
+- **config**: 配置缺失/配置错误/环境差异
+- **null-handling**: 空指针/空值/Optional 处理
+- **type-mismatch**: 类型不匹配/类型转换失败
+- **api-misuse**: API 误用/参数传错/版本不兼容
+- **performance**: 性能问题/内存泄漏/慢查询
+- **logic-error**: 业务逻辑错误/边界条件遗漏
+- **dependency**: 依赖冲突/版本冲突/classpath 问题
+- **network**: 网络超时/连接失败/DNS 解析
+- **other**: 不属于以上任何类别
+
 【输出格式（必须是合法 JSON）】
 ```json
 {
@@ -42,6 +56,7 @@ topic_content:
   "domain": null,
   "general_category": null,
   "tags": ["rate-limit", "redis"],
+  "bug_category": null,
   "confidence": 0.9,
   "reasoning": "包含 winterfell 的具体业务实体 OfferModel"
 }
@@ -51,3 +66,4 @@ topic_content:
 - general_category 必须是预定义类别之一：java / python / typescript / redis / mysql / debugging / ai-tools / git / shell / system-design / 其他归为 misc
 - tags 用小写连字符（kebab-case）
 - 当 scope=general 时，project 和 domain 必须为 null
+- bug_category：仅当该 topic 的 knowledge_type=bugfix 时填写，否则为 `null`

@@ -36,12 +36,14 @@ QODER_DB_PATH: Path = Path(os.path.expanduser(
 AONE_COPILOT_KV_DIR: Path = Path(os.path.expanduser(
     "~/.aone_copilot/kv_storage"
 ))
+CLAUDE_CODE_PROJECTS_DIR: Path = Path(os.path.expanduser(
+    "~/.claude/projects"
+))
 
 IDE_DB_PATHS: dict[str, Path] = {
     "cursor": CURSOR_DB_PATH,
     "qoder": QODER_DB_PATH,
 }
-
 
 def ensure_data_dirs() -> None:
     """确保所有运行时数据目录存在（幂等）"""

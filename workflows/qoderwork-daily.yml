@@ -1,10 +1,22 @@
-# QoderWork 每日定时任务模板（Phase 5 完成后启用）
+# QoderWork 每日定时任务模板
 #
-# 用途：每日 22:00 自动跑完整 pipeline，把当日对话沉淀到知识库。
+# 用途：每日 22:00 自动跑 pipeline 的「机械步骤」部分（不调 LLM），
+#       为第二天的 IDE Agent 接力消化准备好任务包。
 #
-# 安装：在 QoderWork 中导入此 yml 文件即可。
+# ⚠️ 重要：本调度版【只跑 3 个 step】（collect / distill-plan / compile-route），
+#         它们都【不调用 LLM】。真正消化 distill task、把 topic ingest 写进 wiki
+#         的工作必须在 IDE 里让 AI Agent 接力完成（设计如此，因为消化阶段必须
+#         复用宿主 IDE 的 LLM 能力，不能脱机）。
 #
-# 当前状态：占位（待 Phase 5 实现 QoderWork 适配）
+# 因此实际工作流是：
+#   - 22:00（QoderWork 自动）：跑此 yml → 留下「分好的任务包」
+#   - 第二天打开 IDE 时：对 AI 说「消化下昨天的 memory tasks」，AI 自动续跑余下环节
+#
+# 安装与排查见：docs/install-and-schedule.md §8（QoderWork 定时任务）
+#
+# 部署前请检查：
+#   - env.PROJECT_ROOT 是否指向你的实际安装路径
+#   - QoderWork 上 python3 的 PATH 是否能解析（必要时改成绝对路径）
 
 name: ai-coding-memory-daily
 description: 每日 22:00 自动采集 + 清洗 + 入库 AI 编码对话
@@ -22,25 +34,37 @@ steps:
     timeout_seconds: 60
     on_failure: stop
 
-  - name: distill
-    description: 清洗为分层 topic 文件
+  - name: distill-plan
+    description: |
+      生成 distill 任务包（Agent 编排模式）。
+      不直接调用 LLM；任务包写入 ~/.ai-memory/raw/distill-tasks/<date>/，
+      由宿主 IDE 中的 AI Agent 按 distill/SKILL.md 指引接力消化（plan → 消化
+      step1 → expand → 消化 step2 → expand → 消化 step3 → expand → 消化 step4
+      → assemble）。
     command: python3
     args:
       - ${PROJECT_ROOT}/distill/scripts/distill.py
+      - plan
       - --date
       - today
       - --verbose
-    timeout_seconds: 600   # LLM 调用较慢，给 10 分钟
-    on_failure: continue   # distill 失败不阻塞 compile（compile 可处理之前的 topics）
+    timeout_seconds: 60    # 仅生成提示词与 manifest，无 LLM 调用
+    on_failure: continue   # 当天没有 sessions 也不应阻塞流水线
 
-  - name: compile
-    description: 入库到 llm-wiki 知识库
+  - name: compile-route
+    description: |
+      路由 distill 产出 + 自动初始化分层子知识库（Agent 编排模式）。
+      不直接调用 LLM；任务清单写入 ~/.ai-memory/wiki/.compile-manifest/<date>.json，
+      由宿主 IDE 中的 AI Agent 按 compile/SKILL.md 指引接力消化（cd 到子库 →
+      按 llm-wiki SKILL.md 的 ingest 工作流逐个 topic 入库 → 改 manifest 状态）。
+      仅当 ~/.ai-memory/raw/topics/<date>/ 非空时才会有任务；否则安全跳过。
     command: bash
     args:
       - ${PROJECT_ROOT}/compile/scripts/crystallize_topics.sh
       - today
-    timeout_seconds: 1200  # crystallize 是 LLM 密集型，给 20 分钟
-    on_failure: stop
+      - --verbose
+    timeout_seconds: 120   # 仅做路由 + N 次 init-wiki.sh，无 LLM 调用
+    on_failure: continue   # distill 仍在进行 / 当天无 topics 时跳过即可
 
 env:
   PROJECT_ROOT: ${HOME}/ai-coding-memory   # 用户安装位置（按需调整）

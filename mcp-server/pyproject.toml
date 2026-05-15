@@ -1,0 +1,22 @@
+[project]
+name = "ai-coding-memory-mcp-server"
+version = "0.1.0"
+description = "MCP server exposing layered personal coding knowledge to IDEs"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=0.2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools]
+# 单文件入口 + lib 包
+py-modules = ["server"]
+packages = ["lib"]
+
+# 关于依赖：仅 fastmcp（MCP runtime）+ pyyaml（domain-mapping 解析）
+# 召回引擎本身只用 stdlib（pathlib / re），保证零额外搜索引擎依赖

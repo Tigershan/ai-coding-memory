@@ -23,11 +23,13 @@
 - 长度 < 30 行
 - 必须为代码添加 `// 关键点：xxx` 注释，说明该片段的"教学价值"
 
-🔴 **process（过程性，丢弃）**
+🔴 **process（过程性，丢弃但保留失败教训）**
 满足以下任一：
 - 中间尝试方案（已被否决）
 - AI 给出的草稿后被纠正
 - 长度 > 50 行的实现细节（强制压缩为摘要）
+
+**重要**：被丢弃的 process 代码中，如果存在"尝试了但失败"的方案，必须在 `discarded_summary` 中记录**失败的原因**（不只是"做了什么"，还要说"为什么不行"）。这些失败教训本身就是高价值知识。
 
 【输入】
 topic_title: {topic_title}
@@ -42,6 +44,7 @@ topic_dialogue: {dialogue_with_code_blocks}
       "language": "java",
       "code": "RateLimiter limiter = ...",
       "annotation": "最终采用：基于 Redisson 的分布式限流",
+      "reusable_pattern": "distributed-rate-limiting",
       "source_msg_idx": 18
     },
     {
@@ -49,15 +52,18 @@ topic_dialogue: {dialogue_with_code_blocks}
       "language": "java",
       "code": "// 关键点：复用 sha 避免每次重新加载脚本\nString sha = redisConnection.scriptLoad(luaScript);\nredisConnection.evalSha(sha, ...);",
       "annotation": "Redis evalSha 标准用法",
+      "reusable_pattern": "redis-eval-sha",
       "source_msg_idx": 14
     }
   ],
-  "discarded_summary": "丢弃了 2 段过程性代码：（1）初版同步限流方案（被并发问题推翻）；（2）AI 草稿，使用 Guava RateLimiter 但不支持分布式",
+  "discarded_summary": "丢弃了 2 段过程性代码：（1）初版同步限流方案 → 失败原因：并发场景下无法保证原子性；（2）Guava RateLimiter 方案 → 失败原因：只支持单机，分布式部署下各节点限流不互通",
   "filter_confidence": 0.9
 }
 ```
 
 【约束】
 - educational 类必须为代码加 `// 关键点：xxx` 注释
-- process 类不输出代码，只在 discarded_summary 中描述"做了什么 + 关键 API"
+- process 类不输出代码，在 discarded_summary 中描述"做了什么 + 关键 API + 为什么失败/被放弃"
+- discarded_summary 格式示例：`（1）方案名 → 失败原因：xxx`，确保每个被丢弃方案都有失败/放弃原因
 - 若所有代码都是 process 类，kept_snippets 为空数组
+- reusable_pattern：用 kebab-case 标识该代码片段的可复用模式（如 `distributed-rate-limiting`、`redis-eval-sha`、`retry-with-backoff`），便于后续按 pattern 类型检索。如果代码不构成通用 pattern 则填 `null`

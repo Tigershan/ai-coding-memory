@@ -1,0 +1,3 @@
+[submodule "compile/llm-wiki-skill"]
+	path = compile/llm-wiki-skill
+	url = https://github.com/Tigershan/llm-wiki-skill.git
