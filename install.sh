@@ -30,49 +30,32 @@ error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 # ---- 路径常量 ----
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DATA_ROOT="${HOME}/.ai-memory"
-DEFAULT_CONFIG="${PROJECT_ROOT}/config/domain-mapping.example.yml"
-USER_CONFIG="${DATA_ROOT}/config/domain-mapping.yml"
 
 info "🚀 Installing ai-coding-memory at ${PROJECT_ROOT}"
 
-# ---- Step 1: 初始化 submodule ----
-info "📦 Step 1/7: Initializing submodules (forked llm-wiki-skill)..."
-cd "$PROJECT_ROOT"
-if [ -f .gitmodules ]; then
-    if ! git submodule update --init --recursive; then
-        warn "submodule 拉取失败，请检查 .gitmodules 中的 fork URL 和网络"
-        warn "（继续后续步骤，submodule 可稍后手动初始化）"
-    fi
-else
-    warn ".gitmodules 不存在，跳过（首次开发阶段正常，待 fork llm-wiki-skill 后补上）"
-fi
+# [P0 NOTE] redesign.md ADR-3 后已无 llm-wiki submodule。原 Step 1 已废弃。
+# [P3 TODO] 本脚本将整体重写，加入 LLM mode 询问 (host_agent / api / local)
+# 和首次 init 集成（见 redesign.md §6.0 / §6.5）。
 
-# ---- Step 2: 创建数据目录 ----
-info "📁 Step 2/7: Creating data directories at ${DATA_ROOT}..."
+# ---- Step 1: 创建数据目录 ----
+info "📁 Step 1/4: Creating data directories at ${DATA_ROOT}..."
+mkdir -p "${DATA_ROOT}/personal"
+mkdir -p "${DATA_ROOT}/projects"
+mkdir -p "${DATA_ROOT}/.cold"
+mkdir -p "${DATA_ROOT}/.pending"
+mkdir -p "${DATA_ROOT}/archive"
 mkdir -p "${DATA_ROOT}/raw/sessions"
-mkdir -p "${DATA_ROOT}/raw/topics"
-mkdir -p "${DATA_ROOT}/wiki"
+mkdir -p "${DATA_ROOT}/wiki"          # 旧布局，过渡期保留
 mkdir -p "${DATA_ROOT}/config"
 mkdir -p "${DATA_ROOT}/logs"
+info "  ✓ data root ready"
 
-# ---- Step 3: 复制默认配置 ----
-info "📝 Step 3/7: Setting up config..."
-if [ ! -f "$USER_CONFIG" ]; then
-    if [ -f "$DEFAULT_CONFIG" ]; then
-        cp "$DEFAULT_CONFIG" "$USER_CONFIG"
-        info "  Created default config: ${USER_CONFIG}（请按需编辑）"
-    else
-        warn "默认配置模板不存在：${DEFAULT_CONFIG}"
-    fi
-else
-    info "  配置已存在，跳过：${USER_CONFIG}"
-fi
-
-# ---- Step 4: 安装 Python 依赖（智能跳过：已具备 → 不重装） ----
-info "🐍 Step 4/7: Checking Python environment..."
+# ---- Step 2: 安装 Python 依赖（智能跳过：已具备 → 不重装） ----
+info "🐍 Step 2/4: Checking Python environment..."
 
 REQUIRED_PY_MAJOR=3
 REQUIRED_PY_MINOR=10
+# pyyaml 用于 P3+ 的 config.yml 加载；fastmcp 是 MCP runtime
 REQUIRED_PKGS=(fastmcp yaml)   # yaml 来自 pyyaml 包；import 名是 yaml
 
 # 4.1 检查 python3 是否存在
@@ -132,21 +115,9 @@ else
     fi
 fi
 
-# ---- Step 5: 检查系统依赖 ----
-info "🔍 Step 5/7: Checking system dependencies..."
-all_ok=1
-for cmd in jq node python3; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        warn "缺少 ${cmd}，请运行: brew install ${cmd}"
-        all_ok=0
-    fi
-done
-if [ $all_ok -eq 1 ]; then
-    info "  系统依赖齐全（jq, node, python3）"
-fi
-
-# ---- Step 6: 注入 MCP 配置 ----
-info "🔌 Step 6/7: Configuring MCP servers..."
+# ---- Step 3: 注入 MCP 配置 ----
+# [P0 NOTE] jq/node 系统依赖检查已删（ADR-3 砍 graph 后不再需要）
+info "🔌 Step 3/4: Configuring MCP servers..."
 if [ -f "${PROJECT_ROOT}/scripts/inject_mcp_config.py" ]; then
     for ide_config in \
         "${HOME}/.cursor/mcp.json" \
@@ -167,8 +138,8 @@ else
     info "  MCP 注入脚本未实现，跳过"
 fi
 
-# ---- Step 7: 把统一 skill 包安装到 IDE skills 目录 ----
-info "🧠 Step 7/7: Installing unified skill package to IDE skills directories..."
+# ---- Step 4: 把统一 skill 包安装到 IDE skills 目录 ----
+info "🧠 Step 4/4: Installing unified skill package to IDE skills directories..."
 SKILL_SRC="${PROJECT_ROOT}/skill"
 SKILL_NAME="ai-coding-memory"
 

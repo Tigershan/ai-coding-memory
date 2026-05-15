@@ -1,1 +1,1 @@
-../../docs/design.md
+../../docs/redesign.md

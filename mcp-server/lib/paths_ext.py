@@ -1,10 +1,12 @@
 """mcp-server 路径常量（跨包复用 collect/lib/paths）
 
-所有 mcp-server 写入/读取的目录：
-    ~/.ai-memory/wiki/                      ← 召回数据源（compile 阶段写入）
-    ~/.ai-memory/wiki/<scope>/<name>/_index.md
-    ~/.ai-memory/wiki/<scope>/<name>/wiki/{entities,topics,synthesis}/*.md
-    ~/.ai-memory/config/domain-mapping.yml  ← 用户编辑的领域映射
+[NOTE] P0 减法版：
+    - 移除了 DOMAIN_MAPPING_PATH（ADR-1 砍 domain 层）
+    - 仍兼容旧 wiki/ 目录布局；P1/P4 会切换到 ~/.ai-memory/{personal,projects/<key>}/
+
+所有 mcp-server 读写的目录：
+    ~/.ai-memory/wiki/                      ← 召回数据源（旧布局，过渡期）
+    ~/.ai-memory/{personal,projects}/       ← 新布局（P1 起）
 
 环境变量覆盖（便于多机器/测试）：
     AI_MEMORY_DATA_ROOT     覆盖 DATA_ROOT
@@ -38,11 +40,10 @@ def _override_root(default: Path) -> Path:
 DATA_ROOT: Path = _override_root(_collect_paths.DATA_ROOT)
 WIKI_ROOT: Path = DATA_ROOT / "wiki"
 CONFIG_DIR: Path = DATA_ROOT / "config"
-DOMAIN_MAPPING_PATH: Path = CONFIG_DIR / "domain-mapping.yml"
 
-# scope → wiki 子目录名（与 compile/lib/scope_router 保持一致）
+# scope → wiki 子目录名（旧布局，过渡期）
+# P1 起新布局只用 personal / projects 两层
 SCOPE_DIR_NAME = {
     "project": "projects",
-    "domain": "domains",
     "general": "general",
 }

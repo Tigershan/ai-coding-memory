@@ -21,7 +21,7 @@ WIKI_ROOT: Path = DATA_ROOT / "wiki"
 
 # ==== 配置 ====
 CONFIG_DIR: Path = DATA_ROOT / "config"
-DOMAIN_MAPPING_PATH: Path = CONFIG_DIR / "domain-mapping.yml"
+USER_CONFIG_PATH: Path = CONFIG_DIR / "config.yml"  # P3 起：LLM mode 等用户配置
 
 # ==== 日志 ====
 LOG_DIR: Path = DATA_ROOT / "logs"

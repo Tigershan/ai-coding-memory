@@ -1,6 +1,14 @@
-# ai-coding-memory 设计文档 v0.3 (Final)
+# ai-coding-memory 设计文档 v0.3 [DEPRECATED]
 
-> 本文档为项目最终设计文档，所有实施工作以本文档为准。
+> ⚠️ **本文档已废弃，仅作历史归档参考。**
+> 当前权威设计：[`docs/redesign.md`](redesign.md) (v1.2 起)
+>
+> 主要废弃原因：
+> - 5 stage / 3 层 / 4-step distill / Agent 编排手工消化 等设计与"零配置跨 agent memory"目标不匹配
+> - 强依赖 LLM provider，无法兼容企业内/无 API key 用户
+> - llm-wiki fork + graph + Louvain 复杂度远超个人量级所需
+>
+> 详细对照见 redesign.md §10。
 
 ## 0. 变更说明（vs v0.2）
 

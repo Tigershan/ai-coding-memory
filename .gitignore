@@ -12,6 +12,7 @@ venv/
 # ---- IDE ----
 .idea/
 .vscode/
+.claude/              # Claude Code workspace local state
 *.swp
 *.swo
 .DS_Store
@@ -21,14 +22,9 @@ venv/
 # （实际数据在 ~/.ai-memory/，此处仅防止误把本地测试数据入库）
 .local-data/
 *.log
-.compile-errors.log
 errors.log
-
-# ---- Submodule build artifacts ----
-compile/llm-wiki-skill/wiki/
-compile/llm-wiki-skill/.cache/
 
 # ---- Secrets ----
 .env
 .env.local
-config/domain-mapping.yml      # 用户私有配置不入库（example 入库即可）
+config/config.yml     # 用户私有配置不入库（P3 起 config.yml 替代 domain-mapping）

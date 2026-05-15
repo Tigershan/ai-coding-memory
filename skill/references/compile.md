@@ -1,1 +1,0 @@
-../../compile/SKILL.md

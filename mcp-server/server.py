@@ -59,9 +59,9 @@ mcp = FastMCP(
     name="ai-coding-memory",
     instructions=(
         "Personal coding-memory recall over a layered local wiki "
-        "(projects/<X> + domains/<Y> + general/<Z>). "
+        "(projects/<X> + general/<Z>). "
         "This user has a personal knowledge base containing their past coding experiences, "
-        "project-specific decisions, debugging history, architecture designs, and domain knowledge. "
+        "project-specific decisions, debugging history, and architecture designs. "
         "ALWAYS call search_memory when the user's question is about a specific project, feature, "
         "bug, config, or workflow that they may have encountered before — even if they don't "
         "explicitly say 'I remember' or 'last time'. "
@@ -122,9 +122,8 @@ def search_memory(query: str, scope: str = "auto") -> str:
     参数：
         query : 用户的自然语言查询（直接传他原话即可，无需改写关键词）
         scope : 召回范围
-            - "auto" (默认)       项目 + 领域 + 通用 全部
+            - "auto" (默认)       项目 + 通用 全部
             - "current_project"   仅当前项目
-            - "domain"            仅当前所属领域
             - "general"           仅通用层
             - "all"               整个知识库（用于全局搜索）
 
@@ -146,8 +145,6 @@ def search_memory(query: str, scope: str = "auto") -> str:
         f"**scope**: `{scope_info['mode']}` "
         f"→ {len(scope_info['include_paths'])} sub-wikis",
     ]
-    if scope_info.get("domain"):
-        header_lines.append(f"**domain**: `{scope_info['domain']}`")
     if scope_info["warnings"]:
         header_lines.append("⚠️ " + "; ".join(scope_info["warnings"]))
 
@@ -204,7 +201,7 @@ def list_topics(scope: str = "auto") -> str:
             （平时编码场景应使用 search_memory 而非 list_topics，避免输出过长。）
 
     参数：
-        scope : 与 search_memory 相同（auto / current_project / domain / general / all）
+        scope : 与 search_memory 相同（auto / current_project / general / all）
 
     返回：按 scope 分组的主题清单（每条含路径 + H1 标题）。
     """
@@ -251,7 +248,6 @@ def _self_check() -> int:
         "scope_auto": {
             "mode": scope_info["mode"],
             "project": scope_info["project"],
-            "domain": scope_info["domain"],
             "include_paths": [str(p) for p in scope_info["include_paths"]],
             "warnings": scope_info["warnings"],
         },

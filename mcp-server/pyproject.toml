@@ -18,5 +18,5 @@ dev = [
 py-modules = ["server"]
 packages = ["lib"]
 
-# 关于依赖：仅 fastmcp（MCP runtime）+ pyyaml（domain-mapping 解析）
+# 关于依赖：仅 fastmcp（MCP runtime）+ pyyaml（config.yml 加载）
 # 召回引擎本身只用 stdlib（pathlib / re），保证零额外搜索引擎依赖
