@@ -1,0 +1,273 @@
+"""core.llm_provider - LLM 来源抽象层（按 redesign §6.0 / ADR-10）
+
+三档来源按优先级：
+    1. host_agent（默认）：宿主 agent 自跑（通过 MCP 任务包） — P3 落地
+    2. api（可选加速）：OpenAI-compatible HTTP API
+    3. local（远期）：Ollama 等
+
+P2 范围内只实现 api 模式 + 抽象接口；host_agent 的"任务包写盘"留 P3。
+
+接口契约：
+    provider.is_synchronous()  -> bool   同步可调（api/local） vs 异步通过任务包
+    provider.run(prompt)       -> str    同步：直接返回 LLM 输出
+                                          异步：写任务包，抛 PendingTaskError
+
+配置来源（按优先级）：
+    1. AI_MEMORY_LLM_MODE / AI_MEMORY_LLM_API_KEY 等环境变量
+    2. ~/.ai-memory/config.yml  llm: 段
+    3. 自动检测：有 OPENAI_API_KEY/DASHSCOPE_API_KEY → api；否则 host_agent
+
+注意：自动检测仅决定 mode；不会偷偷用 key——install.sh 必须显式询问用户（C 方案）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Any
+
+
+# ==================== 异常 ====================
+
+class PendingTaskError(Exception):
+    """host_agent 模式下 run() 抛出：任务已写入 .pending/，等 agent 消化"""
+
+    def __init__(self, task_id: str, task_path: str):
+        super().__init__(f"task pending: {task_id} → {task_path}")
+        self.task_id = task_id
+        self.task_path = task_path
+
+
+class LLMCallError(Exception):
+    """api/local 模式下 run() 失败"""
+
+
+# ==================== 配置 ====================
+
+@dataclass
+class LLMConfig:
+    mode: str = "auto"                       # auto → 由 detect 决定；可被覆盖为 host_agent | api | local
+    api_provider: str = "dashscope"          # 仅 mode=api：dashscope | openai | 兼容 OpenAI 的其他
+    api_base: str = ""                       # 留空时用 provider 默认
+    api_model: str = "qwen-plus"
+    api_key: str = ""
+    api_timeout_s: int = 60
+    api_max_retries: int = 2
+    api_concurrency: int = 4
+    api_daily_budget_yuan: float = 0.0       # 0 = 无限制
+
+
+_DEFAULTS = {
+    "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "openai": "https://api.openai.com/v1",
+}
+
+
+def detect_mode_from_env(cfg: LLMConfig | None = None) -> str:
+    """按优先级解析 mode（不读 config.yml；config.py 加载时会覆写本函数返回值）"""
+    env_mode = os.environ.get("AI_MEMORY_LLM_MODE")
+    if env_mode:
+        return env_mode
+    if cfg and cfg.mode and cfg.mode != "auto":
+        return cfg.mode
+    if os.environ.get("OPENAI_API_KEY") or os.environ.get("DASHSCOPE_API_KEY"):
+        return "api"
+    return "host_agent"
+
+
+def load_config_from_env() -> LLMConfig:
+    """从 env / config.yml 加载（P3 加 config.yml 完整支持；现在主要走 env）"""
+    cfg = LLMConfig()
+
+    # 1. 从 ~/.ai-memory/config.yml 加载（如果存在；用 frontmatter parser 复用）
+    try:
+        from .paths import USER_CONFIG_PATH
+        from . import frontmatter as fm
+        if USER_CONFIG_PATH.exists():
+            text = USER_CONFIG_PATH.read_text(encoding="utf-8")
+            # config.yml 不是 markdown，包成 frontmatter 复用 parser
+            data = fm._parse_yaml(text)
+            llm = data.get("llm") or {}
+            cfg.mode = llm.get("mode") or cfg.mode
+            api = llm.get("api") or {}
+            cfg.api_provider = api.get("provider") or cfg.api_provider
+            cfg.api_base = api.get("base") or cfg.api_base
+            cfg.api_model = api.get("model") or cfg.api_model
+            cfg.api_timeout_s = int(api.get("timeout_s") or cfg.api_timeout_s)
+            cfg.api_max_retries = int(api.get("max_retries") or cfg.api_max_retries)
+            cfg.api_concurrency = int(api.get("concurrency") or cfg.api_concurrency)
+            cfg.api_daily_budget_yuan = float(api.get("daily_budget_yuan") or cfg.api_daily_budget_yuan)
+            key_env = api.get("key_env") or "DASHSCOPE_API_KEY"
+            cfg.api_key = os.environ.get(key_env, "")
+    except Exception:
+        # 解析失败不阻塞，走 env 兜底
+        pass
+
+    # 2. env 直接覆盖
+    cfg.mode = os.environ.get("AI_MEMORY_LLM_MODE", cfg.mode)
+    cfg.api_model = os.environ.get("AI_MEMORY_LLM_MODEL", cfg.api_model)
+    cfg.api_base = os.environ.get("AI_MEMORY_LLM_API_BASE", cfg.api_base)
+    if not cfg.api_key:
+        cfg.api_key = (
+            os.environ.get("AI_MEMORY_LLM_API_KEY")
+            or os.environ.get("DASHSCOPE_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        )
+
+    # 3. mode=auto 解析
+    if cfg.mode == "auto":
+        cfg.mode = detect_mode_from_env(cfg)
+
+    # 4. provider 默认 base url
+    if cfg.mode == "api" and not cfg.api_base:
+        cfg.api_base = _DEFAULTS.get(cfg.api_provider, _DEFAULTS["dashscope"])
+
+    return cfg
+
+
+# ==================== Provider 接口 ====================
+
+class LLMProvider:
+    """所有 provider 的基类"""
+
+    def is_synchronous(self) -> bool:
+        raise NotImplementedError
+
+    def run(self, prompt: str, *, system: str = "") -> str:
+        """同步：返回 LLM 文本输出。
+        异步：抛 PendingTaskError（来自 host_agent provider）。
+        失败：抛 LLMCallError。"""
+        raise NotImplementedError
+
+    @property
+    def mode(self) -> str:
+        raise NotImplementedError
+
+
+# ==================== api 模式 ====================
+
+class ApiProvider(LLMProvider):
+    """OpenAI-compatible HTTP API"""
+
+    def __init__(self, cfg: LLMConfig):
+        if not cfg.api_key:
+            raise LLMCallError(
+                "api 模式需要 API key。请设置 DASHSCOPE_API_KEY / OPENAI_API_KEY，"
+                "或在 ~/.ai-memory/config.yml 中配置 llm.api.key_env"
+            )
+        self.cfg = cfg
+
+    @property
+    def mode(self) -> str:
+        return "api"
+
+    def is_synchronous(self) -> bool:
+        return True
+
+    def run(self, prompt: str, *, system: str = "") -> str:
+        url = self.cfg.api_base.rstrip("/") + "/chat/completions"
+        body: dict[str, Any] = {
+            "model": self.cfg.api_model,
+            "messages": [
+                *([{"role": "system", "content": system}] if system else []),
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+        }
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.cfg.api_key}",
+        }
+
+        last_err: Exception | None = None
+        for attempt in range(self.cfg.api_max_retries + 1):
+            try:
+                req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=self.cfg.api_timeout_s) as resp:
+                    raw = resp.read().decode("utf-8")
+                payload = json.loads(raw)
+                choices = payload.get("choices") or []
+                if not choices:
+                    raise LLMCallError(f"API 返回无 choices: {raw[:200]}")
+                msg = choices[0].get("message") or {}
+                content = msg.get("content") or ""
+                if not content:
+                    raise LLMCallError(f"API 返回空 content: {raw[:200]}")
+                return content
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError) as e:
+                last_err = e
+                if attempt < self.cfg.api_max_retries:
+                    time.sleep(1.5 ** attempt)
+                    continue
+            except LLMCallError:
+                raise
+        raise LLMCallError(f"API 调用失败（已重试 {self.cfg.api_max_retries} 次）: {last_err}")
+
+
+# ==================== host_agent 模式（P3 落地） ====================
+
+class HostAgentProvider(LLMProvider):
+    """通过任务包让宿主 agent 自跑。P3 实现；P2 阶段抛 NotImplementedError 占位。"""
+
+    def __init__(self, cfg: LLMConfig):
+        self.cfg = cfg
+
+    @property
+    def mode(self) -> str:
+        return "host_agent"
+
+    def is_synchronous(self) -> bool:
+        return False
+
+    def run(self, prompt: str, *, system: str = "") -> str:
+        raise NotImplementedError(
+            "host_agent 模式将在 P3 实现：写 .pending/<task>.task 并抛 PendingTaskError。\n"
+            "当前 P2 阶段请通过环境变量启用 api 模式：\n"
+            "  export OPENAI_API_KEY=...   # 或 DASHSCOPE_API_KEY"
+        )
+
+
+# ==================== 工厂 ====================
+
+def make_provider(cfg: LLMConfig | None = None) -> LLMProvider:
+    """根据 config 返回对应 provider 实例"""
+    cfg = cfg or load_config_from_env()
+    if cfg.mode == "api":
+        return ApiProvider(cfg)
+    if cfg.mode == "host_agent":
+        return HostAgentProvider(cfg)
+    if cfg.mode == "local":
+        raise NotImplementedError("local 模式（Ollama）远期支持，见 redesign ADR-10")
+    raise ValueError(f"未知 LLM mode: {cfg.mode!r}")
+
+
+# ==================== 调试入口 ====================
+
+def _debug() -> None:
+    cfg = load_config_from_env()
+    print(json.dumps({
+        "mode": cfg.mode,
+        "api_provider": cfg.api_provider,
+        "api_base": cfg.api_base,
+        "api_model": cfg.api_model,
+        "api_key_present": bool(cfg.api_key),
+        "api_key_source": _which_key_env(),
+        "api_concurrency": cfg.api_concurrency,
+    }, ensure_ascii=False, indent=2))
+
+
+def _which_key_env() -> str | None:
+    for name in ("AI_MEMORY_LLM_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"):
+        if os.environ.get(name):
+            return name
+    return None
+
+
+if __name__ == "__main__":
+    _debug()

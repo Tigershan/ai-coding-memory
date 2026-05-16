@@ -193,11 +193,27 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_distill(args: argparse.Namespace) -> int:
+    """P2 落地：调 distill/scripts/distill.py 主入口"""
+    # 直接 import 模块函数（避免子进程开销）
+    from distill.scripts import distill as distill_mod  # noqa: E402
+
+    forwarded = ["--range", args.range]
+    if args.mode:
+        forwarded += ["--mode", args.mode]
+    if args.concurrency:
+        forwarded += ["--concurrency", str(args.concurrency)]
+    if args.dry_run:
+        forwarded += ["--dry-run"]
+    if args.verbose:
+        forwarded += ["--verbose"]
+    return distill_mod.main(forwarded)
+
+
 def cmd_not_implemented(args: argparse.Namespace) -> int:
-    """P2-P5 phase 才实现的命令"""
+    """P3-P5 phase 才实现的命令"""
     name = args._cmd_name
     phase = {
-        "distill": "P2",
         "init": "P3",
         "pending": "P3",
         "config": "P3",
@@ -206,7 +222,7 @@ def cmd_not_implemented(args: argparse.Namespace) -> int:
         "rebuild-index": "P5",
     }.get(name, "未来 phase")
     print(f"⚠️  `ai-memory {name}` 计划在 {phase} 实现", file=sys.stderr)
-    print(f"   当前 P1 范围：add / edit / ls / show / archive / restore", file=sys.stderr)
+    print(f"   当前可用：add / edit / ls / show / archive / restore / distill", file=sys.stderr)
     return 2
 
 
@@ -258,9 +274,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_rst.add_argument("id")
     p_rst.set_defaults(func=cmd_restore)
 
-    # 占位命令（P2-P5）
+    # distill - P2 已落地
+    p_dist = sub.add_parser("distill", help="蒸馏当日 sessions 为 memory")
+    p_dist.add_argument("--range", default="today",
+                        help="today | yesterday | YYYY-MM-DD")
+    p_dist.add_argument("--mode", choices=["api", "host_agent", "local"],
+                        help="覆盖 LLM mode（默认 env / config.yml 推断）")
+    p_dist.add_argument("--concurrency", type=int)
+    p_dist.add_argument("--dry-run", action="store_true",
+                        help="只跑过滤 + 估算，不调 LLM 不写入")
+    p_dist.add_argument("--verbose", action="store_true")
+    p_dist.set_defaults(func=cmd_distill)
+
+    # 占位命令（P3-P5）
     for name, helptext in [
-        ("distill", "[P2] 蒸馏当日 sessions 为 memory"),
         ("init", "[P3] 首次回溯历史对话"),
         ("pending", "[P3] 看 host_agent 模式的待消化任务包"),
         ("config", "[P3] 读写 LLM mode 等用户配置"),
