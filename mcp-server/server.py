@@ -51,8 +51,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core import memory_store as ms  # noqa: E402
-from core import task_pack  # noqa: E402
+from core import agents_md_sync, memory_store as ms, task_pack  # noqa: E402
 from core.memory_store import Memory  # noqa: E402
 from core.project_key import resolve_project_key  # noqa: E402
 
@@ -114,46 +113,53 @@ def _is_path_inside_wiki(p: Path) -> bool:
 # ==================== MCP 工具 ====================
 
 @mcp.tool()
-def search_memory(query: str, scope: str = "auto") -> str:
-    """搜索用户的个人编码知识库（按当前 IDE workspace 自动分层召回）。
+def search_memory(query: str, scope: str = "auto", workspace: str = None) -> str:
+    """搜索用户的个人编码知识库（按 workspace 自动分层召回 + 跨项目经验迁移）。
 
     TRIGGER（满足任一即调用）：
         1. 用户提及回顾性表述：「以前」「上次」「之前」「我记得」「我做过」等
-        2. 用户询问当前项目特定的配置、域名、环境、接口、流程、架构决策等
-           （如「预发域名是什么」「R4保存失败原因」「物料匹配接口怎么调」）
-        3. 用户提问涉及项目中特定功能/模块的历史问题、bug 排查、设计方案
-           （如「XX功能为什么这样设计」「那个502问题后来怎么解决的」）
-        4. 用户问题包含项目专有术语（如技能名、模块名、内部系统名等）
-        5. 不确定时优先调用 — 搜索代价极低（<1s），宁可搜了没结果也不要漏召回
+        2. 用户询问特定项目/技术栈的配置、接口、决策、踩坑等
+           （即使没说"以前"，只要明显是用户特有经验，就该召回）
+        3. 用户在新项目里问看似通用的问题（跨项目经验可能命中）
+        4. 不确定时优先调用 — 搜索代价极低（<1s）
 
-    DON'T TRIGGER：纯粹的通用编程知识问题（如「Java HashMap 是什么」「怎么写 for 循环」）—
-            这些应直接由模型自身回答，不要调用本工具。
+    DON'T TRIGGER：纯粹的通用编程知识问题（如「Java HashMap 是什么」「for 循环怎么写」）
 
     参数：
-        query : 用户的自然语言查询（直接传他原话即可，无需改写关键词）
-        scope : 召回范围
-            - "auto" (默认)       项目 + 通用 全部
-            - "current_project"   仅当前项目
-            - "general"           仅通用层
-            - "all"               整个知识库（用于全局搜索）
+        query     : 用户的自然语言查询（直接传他原话即可）
+        scope     : 召回范围
+            - "auto" (默认)       personal + 当前 project + 跨项目高相关
+            - "current_project"   仅当前 project
+            - "personal"          仅 personal（跨项目通用记忆）
+            - "all"               整个知识库
+        workspace : IDE 当前打开的工作区绝对路径（强烈推荐传入！）
+                    未传则尝试用环境变量 / CWD 兜底，可能不准确
 
-    返回：Markdown 格式的 Top 5 召回结果（含路径、行号、score、上下文片段）。
+    返回：Markdown 格式的 Top 5 召回结果（含 path / score / snippet）。
     """
-    ws = workspace_detector.detect_workspace()
-    scope_info = scope_resolver.resolve_scope(ws["workspace_path"], mode=scope)
+    if workspace:
+        effective_ws = workspace
+        ws_source = "param"
+    else:
+        ws_info = workspace_detector.detect_workspace()
+        effective_ws = ws_info["workspace_path"]
+        ws_source = ws_info["source"]
+    scope_info = scope_resolver.resolve_scope(effective_ws, mode=scope)
     results = searcher.search_with_scope(
         query,
         scope_info["include_paths"],
+        current_project_key=scope_info.get("project_key"),
         top_k=_CFG.top_k,
         snippet_context_lines=_CFG.snippet_context_lines,
         max_results_before_rerank=_CFG.max_results_before_rerank,
     )
 
+    project_key = scope_info.get("project_key")
     header_lines = [
-        f"**workspace**: `{ws.get('project_name') or '(unknown)'}` "
-        f"(detected via {ws['source']})",
+        f"**workspace**: `{effective_ws or '(unknown)'}` (via {ws_source})",
         f"**scope**: `{scope_info['mode']}` "
-        f"→ {len(scope_info['include_paths'])} sub-wikis",
+        f"→ {len(scope_info['include_paths'])} path(s)"
+        + (f", project_key=`{project_key}`" if project_key else ""),
     ]
     if scope_info["warnings"]:
         header_lines.append("⚠️ " + "; ".join(scope_info["warnings"]))
@@ -201,7 +207,7 @@ def read_page(path: str) -> str:
 
 
 @mcp.tool()
-def list_topics(scope: str = "auto") -> str:
+def list_topics(scope: str = "auto", workspace: str = None) -> str:
     """列出知识库主题清单（仅在用户主动询问时调用）。
 
     TRIGGER：用户问「我的知识库里有哪些主题」「列一下你能召回的内容」「show me topics」
@@ -211,19 +217,24 @@ def list_topics(scope: str = "auto") -> str:
             （平时编码场景应使用 search_memory 而非 list_topics，避免输出过长。）
 
     参数：
-        scope : 与 search_memory 相同（auto / current_project / general / all）
+        scope     : 与 search_memory 相同（auto / current_project / personal / all）
+        workspace : IDE 当前打开的工作区路径（推荐传入）
 
     返回：按 scope 分组的主题清单（每条含路径 + H1 标题）。
     """
-    ws = workspace_detector.detect_workspace()
-    scope_info = scope_resolver.resolve_scope(ws["workspace_path"], mode=scope)
+    if workspace:
+        effective_ws = workspace
+    else:
+        ws_info = workspace_detector.detect_workspace()
+        effective_ws = ws_info["workspace_path"]
+    scope_info = scope_resolver.resolve_scope(effective_ws, mode=scope)
     items = searcher.list_topic_files(scope_info["include_paths"])
 
     if not items:
         return (
             f"_当前 scope (`{scope_info['mode']}`) 下尚无 topic 文件_\n\n"
-            f"workspace: `{ws.get('project_name') or '(unknown)'}`, "
-            f"sub-wikis: {len(scope_info['include_paths'])}"
+            f"workspace: `{effective_ws or '(unknown)'}`, "
+            f"paths: {len(scope_info['include_paths'])}"
         )
 
     grouped: dict[str, list[dict]] = {}
@@ -231,9 +242,9 @@ def list_topics(scope: str = "auto") -> str:
         grouped.setdefault(it["scope_name"], []).append(it)
 
     lines = [
-        f"**workspace**: `{ws.get('project_name') or '(unknown)'}`  ",
+        f"**workspace**: `{effective_ws or '(unknown)'}`  ",
         f"**scope**: `{scope_info['mode']}` "
-        f"→ {len(grouped)} sub-wiki(s), {len(items)} topic(s)",
+        f"→ {len(grouped)} path(s), {len(items)} topic(s)",
         "",
     ]
     for sub_name, sub_items in grouped.items():
@@ -333,6 +344,47 @@ def remember(text: str, scope: str = "auto", tags: list[str] = None,
         f"  📄 文件：`{path}`\n"
         f"  💡 用户可随时 `$EDITOR` 打开此文件修改，下次 pipeline 不会覆盖（人改优先）。"
     )
+
+
+@mcp.tool()
+def project_context(workspace: str) -> str:
+    """返回当前 project 的浓缩记忆摘要（用于 IDE 在 chat 启动时注入到 system prompt）。
+
+    TRIGGER：
+        - IDE 启动一个新 chat 时主动调一次（提前给 agent 项目背景）
+        - 用户问『这个项目我有什么记下的吗』『回顾下项目知识』时
+        - 不要在每次 search_memory 之前调（用 search_memory 就够，避免 context 重复）
+
+    参数：
+        workspace : IDE 当前打开的 workspace 路径（必传；用来定位 project_key）
+
+    返回：Markdown 摘要（≤ 4KB），含 manual/edited 优先 + high value memory 列表。
+    如果 workspace 不在 git 仓库中或 project 无 memory，返回提示。
+
+    💡 服务端会同时把摘要同步到 <project_root>/AGENTS.md 等位置（ADR-11），
+        不支持 MCP 的 agent 也能从那里读取。
+    """
+    if not workspace:
+        return "❌ project_context 需要 workspace 参数"
+    info = resolve_project_key(workspace)
+    if not info:
+        return f"_workspace `{workspace}` 不在 git 仓库中，无 project 记忆_"
+    project_key = info["key"]
+    summary = agents_md_sync.build_summary(project_key)
+    if not summary:
+        return f"_project `{project_key}` 暂无 memory（用 remember 工具或 ai-memory distill 添加）_"
+
+    # 同步到 AGENTS.md（zero-MCP 兜底，最佳努力 —— 失败不影响本调用返回）
+    try:
+        written = agents_md_sync.sync_for_workspace(workspace)
+        sync_hint = (
+            f"\n\n_已同步到：{', '.join(str(p) for p in written)}_"
+            if written else ""
+        )
+    except Exception:
+        sync_hint = ""
+
+    return summary + sync_hint
 
 
 @mcp.tool()
@@ -466,14 +518,16 @@ def _self_check() -> int:
     """python3 server.py --self-check：不启动 MCP，仅打印当前环境探测结果"""
     ws = workspace_detector.detect_workspace()
     scope_info = scope_resolver.resolve_scope(ws["workspace_path"], mode="auto")
+    from core.paths import PERSONAL_DIR, PROJECTS_DIR
     print(json.dumps({
         "data_root": str(DATA_ROOT),
-        "wiki_root": str(WIKI_ROOT),
-        "wiki_root_exists": WIKI_ROOT.exists(),
+        "personal_dir_exists": PERSONAL_DIR.exists(),
+        "projects_dir_exists": PROJECTS_DIR.exists(),
+        "wiki_root_legacy": str(WIKI_ROOT) if WIKI_ROOT.exists() else "(none)",
         "workspace": ws,
         "scope_auto": {
             "mode": scope_info["mode"],
-            "project": scope_info["project"],
+            "project_key": scope_info.get("project_key"),
             "include_paths": [str(p) for p in scope_info["include_paths"]],
             "warnings": scope_info["warnings"],
         },
@@ -489,7 +543,7 @@ def _self_check() -> int:
         },
         "tools": [
             # 召回组
-            "search_memory", "read_page", "list_topics",
+            "search_memory", "read_page", "list_topics", "project_context",
             # 写入组
             "remember", "forget",
             # distill 任务包组（host_agent 模式）

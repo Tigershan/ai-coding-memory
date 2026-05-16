@@ -271,16 +271,43 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_sync_agents_md(args: argparse.Namespace) -> int:
+    """P4 - 把 project 摘要同步到 AGENTS.md"""
+    from core import agents_md_sync
+    from core.project_key import resolve_project_key
+    workspace = args.workspace or os.getcwd()
+    info = resolve_project_key(workspace)
+    if not info:
+        print(f"❌ workspace `{workspace}` 不在 git 仓库或无 origin remote", file=sys.stderr)
+        return 1
+    project_key = info["key"]
+    summary = agents_md_sync.build_summary(project_key)
+    if not summary:
+        print(f"_project `{project_key}` 暂无 memory_")
+        return 1
+    if args.dry_run:
+        print("--- 将写入的内容（dry-run）---")
+        print(summary)
+        return 0
+    targets = [t.strip() for t in args.targets.split(",")] if args.targets else None
+    written = agents_md_sync.sync_for_workspace(workspace, paths=targets)
+    if not written:
+        print(f"（无变更或目标文件无法写入）")
+        return 0
+    for p in written:
+        print(f"✓ 已同步：{p}")
+    return 0
+
+
 def cmd_not_implemented(args: argparse.Namespace) -> int:
-    """P4-P5 phase 才实现的命令"""
+    """P5 phase 才实现的命令"""
     name = args._cmd_name
     phase = {
         "stats": "P5",
-        "sync-agents-md": "P4",
         "rebuild-index": "P5",
     }.get(name, "未来 phase")
     print(f"⚠️  `ai-memory {name}` 计划在 {phase} 实现", file=sys.stderr)
-    print(f"   当前可用：add / edit / ls / show / archive / restore / distill / init / pending / config", file=sys.stderr)
+    print(f"   当前可用：add / edit / ls / show / archive / restore / distill / init / pending / config / sync-agents-md", file=sys.stderr)
     return 2
 
 
@@ -367,10 +394,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_cfg.add_argument("value", nargs="?", help="set 时必填")
     p_cfg.set_defaults(func=cmd_config)
 
-    # 占位命令（P4-P5）
+    # sync-agents-md - P4 已落地
+    p_sync = sub.add_parser("sync-agents-md", help="把项目摘要同步到 AGENTS.md")
+    p_sync.add_argument("--workspace", help="目标项目根（默认 cwd）")
+    p_sync.add_argument("--targets", help="逗号分隔目标文件（默认 AGENTS.md）")
+    p_sync.add_argument("--dry-run", action="store_true", help="只打印不写入")
+    p_sync.set_defaults(func=cmd_sync_agents_md)
+
+    # 占位命令（P5）
     for name, helptext in [
         ("stats", "[P5] 召回反馈 / 写入 / 采纳统计"),
-        ("sync-agents-md", "[P4] 把项目摘要同步到 AGENTS.md"),
         ("rebuild-index", "[P5] 升级到 SQLite FTS5 索引"),
     ]:
         ph = sub.add_parser(name, help=helptext)

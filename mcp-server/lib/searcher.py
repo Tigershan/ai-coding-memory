@@ -1,58 +1,74 @@
-"""searcher - 召回引擎（pure stdlib，无外部依赖）
+"""searcher - 召回引擎（redesign §6.6）
 
-[NOTE] P0 减法版：
-    - 砍掉了 graph_data.json 图谱扩展（ADR-3）
-    - 仍保留 wiki/{entities,topics,synthesis} 兼容扫描，给 P0/P1 过渡期使用
-    - P4 召回升级时会全面切换到新数据模型 (~/.ai-memory/{personal,projects/<key>}/*.md)
-      并加跨项目相关性、SQLite FTS5 阶梯演进 (§6.6)
+P4 版：切到新数据模型 + 跨项目经验迁移
+
+数据布局：
+    scope_path 是 ~/.ai-memory/personal/ 或 ~/.ai-memory/projects/<dir>/
+    每个 .md 文件含 frontmatter + body
 
 策略：
-    1. _index.md / index.md 摘要召回（命中 +10 分）
-    2. 子目录 .md 全文 grep
-    3. 按 (path, line) 去重 + score 降序，截 Top K（默认 5）
+    1. 当前 scope（personal + 当前 project）：全文 grep（基础分）
+       memory.value 加权：high × 1.5 / medium × 1.0 / low × 0.5
+       memory.source 加权：manual × 1.3 / edited × 1.2 / auto × 1.0
+       potentially_superseded_by 不空：× 0.6（过期降权）
+    2. 跨项目候选（其他 projects）：仅当至少有以下信号才进 Top K
+       a. tags 与 query 出现的 tag 重合 ≥ 2
+       b. 标题 token Jaccard 与 query > 0.3
+    3. Top K 重排（默认 K=5）
 
-性能预算 < 1s：纯 grep + 文件 IO，不调 LLM、不建索引。
-
-输入契约：
-    query        : 用户原始查询字符串
-    scope_paths  : list[Path]  来自 scope_resolver.resolve_scope().include_paths
-
-输出：
-    list[dict] - 每条结果包含：
-        source     : "index" | "fulltext"
-        path       : str
-        snippet    : str       命中行 ±2 行的上下文
-        line       : int
-        score      : int
-        scope_path : str       命中所在的 scope 子库根
+性能 < 1s：纯 grep + 文件 IO + 简单算分；不调 LLM、不建索引。
 """
 
+from __future__ import annotations
+
 import re
+import sys
 from pathlib import Path
 from typing import Iterable
 
-# 兼容 llm-wiki 历史命名（index.md / _index.md）。新数据模型也用 _index.md。
-INDEX_FILE_NAMES = ("index.md", "_index.md")
-# 旧 llm-wiki 子目录（过渡期兼容）；新数据模型直接扫 scope_path 下的 *.md
-LEGACY_SUBDIRS = ("entities", "topics", "synthesis")
+_LIB_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _LIB_DIR.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-# 默认值，调用方未传时用
+from core.frontmatter import parse as parse_fm  # noqa: E402
+from core.paths import PERSONAL_DIR, PROJECTS_DIR  # noqa: E402
+from core.project_key import _to_dir_name  # noqa: E402
+
+
+# 默认值（调用方可覆盖）
 DEFAULT_TOP_K = 5
 DEFAULT_SNIPPET_CONTEXT = 2
 DEFAULT_MAX_RESULTS_BEFORE_RERANK = 200
+
+# 跨项目相关性阈值
+CROSS_PROJECT_TAG_OVERLAP_THRESHOLD = 2
+CROSS_PROJECT_TITLE_JACCARD_THRESHOLD = 0.30
+CROSS_PROJECT_SCORE_PENALTY = 0.7  # 跨项目结果整体降权（弱于直接命中）
+
+# value / source 权重
+VALUE_WEIGHTS = {"high": 1.5, "medium": 1.0, "low": 0.5}
+SOURCE_WEIGHTS = {"manual": 1.3, "edited": 1.2, "auto": 1.0, "bootstrap": 1.0}
 
 
 def search_with_scope(
     query: str,
     scope_paths: Iterable[Path],
+    *,
+    current_project_key: str | None = None,
     top_k: int = DEFAULT_TOP_K,
     snippet_context_lines: int = DEFAULT_SNIPPET_CONTEXT,
     max_results_before_rerank: int = DEFAULT_MAX_RESULTS_BEFORE_RERANK,
 ) -> list[dict]:
-    """在多个 scope 路径下检索并合并结果"""
+    """主入口"""
     q = (query or "").strip()
     if not q:
         return []
+
+    current_project_dir = (
+        PROJECTS_DIR / _to_dir_name(current_project_key)
+        if current_project_key else None
+    )
 
     raw: list[dict] = []
     for scope_path in scope_paths:
@@ -60,86 +76,97 @@ def search_with_scope(
         if not scope_path.exists():
             continue
 
-        # 第 1 层：索引摘要召回（高分 +10）
-        index_file = _find_index_file(scope_path)
-        if index_file is not None:
-            for m in _grep_in_file(q, index_file, context_lines=snippet_context_lines):
+        # 判定这条 scope_path 是否"跨项目"
+        is_cross_project = (
+            scope_path != PERSONAL_DIR
+            and current_project_dir is not None
+            and scope_path != current_project_dir
+            and scope_path.parent == PROJECTS_DIR
+        )
+
+        for md_file in scope_path.rglob("*.md"):
+            if len(raw) >= max_results_before_rerank:
+                break
+            try:
+                text = md_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            fm, body = parse_fm(text)
+
+            # 跨项目过滤：必须满足 tags 重合 或 标题相似度阈值
+            if is_cross_project:
+                if not _cross_project_match(q, fm, body):
+                    continue
+
+            # grep
+            matches = _grep_text(q, body, context_lines=snippet_context_lines)
+            if not matches:
+                continue
+
+            value_w = VALUE_WEIGHTS.get(fm.get("value", "medium"), 1.0)
+            source_w = SOURCE_WEIGHTS.get(fm.get("source", "auto"), 1.0)
+            superseded_w = 0.6 if fm.get("potentially_superseded_by") else 1.0
+            cross_w = CROSS_PROJECT_SCORE_PENALTY if is_cross_project else 1.0
+            for m in matches:
+                score = m["match_count"] * value_w * source_w * superseded_w * cross_w
                 raw.append({
-                    "source": "index",
-                    "path": str(index_file),
+                    "source": "fulltext",
+                    "path": str(md_file),
+                    "id": fm.get("id", md_file.stem),
+                    "title": _extract_h1(body) or fm.get("id", ""),
                     "snippet": m["snippet"],
                     "line": m["line"],
-                    "score": 10 + m["match_count"],
+                    "score": round(score, 2),
                     "scope_path": str(scope_path),
+                    "cross_project": is_cross_project,
+                    "value": fm.get("value", "medium"),
+                    "source_tag": fm.get("source", "auto"),
                 })
-
-        # 第 2 层：全文 grep
-        # 兼容两种数据布局：
-        #   a) 旧 llm-wiki：scope_path/wiki/{entities,topics,synthesis}/*.md
-        #   b) 新 redesign：scope_path/*.md（personal/ 或 projects/<key>/）
-        wiki_root = scope_path / "wiki"
-        if wiki_root.exists():
-            for sub in LEGACY_SUBDIRS:
-                sub_dir = wiki_root / sub
-                if not sub_dir.exists():
-                    continue
-                _grep_in_dir(q, sub_dir, scope_path, raw, snippet_context_lines,
-                             max_results_before_rerank)
-        else:
-            _grep_in_dir(q, scope_path, scope_path, raw, snippet_context_lines,
-                         max_results_before_rerank)
 
     return _rerank_and_dedupe(raw)[:top_k]
 
 
-def _find_index_file(scope_path: Path) -> Path | None:
-    for name in INDEX_FILE_NAMES:
-        candidate = scope_path / name
-        if candidate.exists():
-            return candidate
-    return None
+# ==================== 内部 ====================
+
+def _cross_project_match(query: str, fm: dict, body: str) -> bool:
+    """跨项目命中判定：满足任一信号才返回 True"""
+    # 信号 1：tags 与 query 中出现的"词块"有 ≥ 2 个重合
+    fm_tags = set(t.lower() for t in (fm.get("tags") or []) if isinstance(t, str))
+    if fm_tags:
+        q_words = set(re.findall(r"[a-zA-Z0-9_\-]+", query.lower()))
+        overlap = fm_tags & q_words
+        if len(overlap) >= CROSS_PROJECT_TAG_OVERLAP_THRESHOLD:
+            return True
+
+    # 信号 2：标题 token Jaccard 与 query > 阈值
+    title = _extract_h1(body) or ""
+    jac = _token_jaccard(title.lower(), query.lower())
+    if jac > CROSS_PROJECT_TITLE_JACCARD_THRESHOLD:
+        return True
+
+    return False
 
 
-def _grep_in_dir(
-    query: str,
-    search_dir: Path,
-    scope_path: Path,
-    raw: list[dict],
-    context_lines: int,
-    max_results: int,
-) -> None:
-    """递归 grep search_dir 下所有 *.md，命中追加到 raw（in-place）"""
-    for md_file in search_dir.rglob("*.md"):
-        if len(raw) >= max_results:
-            return
-        # 跳过 index 文件，它已经在第 1 层被独立扫过
-        if md_file.name in INDEX_FILE_NAMES:
-            continue
-        for m in _grep_in_file(query, md_file, context_lines=context_lines):
-            raw.append({
-                "source": "fulltext",
-                "path": str(md_file),
-                "snippet": m["snippet"],
-                "line": m["line"],
-                "score": m["match_count"],
-                "scope_path": str(scope_path),
-            })
+def _token_jaccard(a: str, b: str) -> float:
+    ta = set(re.findall(r"\w+", a))
+    tb = set(re.findall(r"\w+", b))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
 
 
-def _grep_in_file(
-    query: str,
-    file_path: Path,
-    context_lines: int = DEFAULT_SNIPPET_CONTEXT,
-) -> list[dict]:
-    """大小写不敏感 grep，返回 [{line, snippet, match_count}, ...]"""
+def _extract_h1(body: str) -> str:
+    for line in body.splitlines():
+        s = line.strip()
+        if s.startswith("# "):
+            return s[2:].strip()
+    return ""
+
+
+def _grep_text(query: str, text: str, *, context_lines: int) -> list[dict]:
     pattern = re.compile(re.escape(query), re.IGNORECASE)
-    try:
-        text = file_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return []
-
-    lines = text.splitlines()
     matches: list[dict] = []
+    lines = text.splitlines()
     for idx, line in enumerate(lines):
         hits = pattern.findall(line)
         if not hits:
@@ -156,48 +183,42 @@ def _grep_in_file(
 
 
 def _rerank_and_dedupe(results: list[dict]) -> list[dict]:
-    """按 (path, line) 去重，按 score 降序排"""
-    seen: dict[tuple[str, int], dict] = {}
+    """按 path 去重（同文件多条命中保留最高分），按 score 降序排"""
+    seen: dict[str, dict] = {}
     for r in results:
-        key = (r["path"], r["line"])
+        key = r["path"]
         if key not in seen or seen[key]["score"] < r["score"]:
             seen[key] = r
     return sorted(seen.values(), key=lambda x: -x["score"])
 
 
+# ==================== list_topics ====================
+
 def list_topic_files(scope_paths: Iterable[Path]) -> list[dict]:
-    """list_topics 工具的底层实现：列出每个 scope 的 .md 文件清单"""
+    """列每个 scope_path 下的 memory 文件清单（带标题）"""
     out: list[dict] = []
     for scope_path in scope_paths:
         scope_path = Path(scope_path)
         if not scope_path.exists():
             continue
-        # 兼容两种布局
-        wiki_topics = scope_path / "wiki" / "topics"
-        scan_root = wiki_topics if wiki_topics.exists() else scope_path
-        for md_file in sorted(scan_root.rglob("*.md")):
-            if md_file.name in INDEX_FILE_NAMES:
+        scope_name = (
+            scope_path.name if scope_path == PERSONAL_DIR
+            else f"projects/{scope_path.name}"
+        )
+        for md_file in sorted(scope_path.rglob("*.md")):
+            try:
+                text = md_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
                 continue
-            title = _extract_title(md_file)
+            fm, body = parse_fm(text)
+            title = _extract_h1(body) or fm.get("id", md_file.stem)
             out.append({
                 "scope_path": str(scope_path),
-                "scope_name": scope_path.name,
+                "scope_name": scope_name,
                 "path": str(md_file),
                 "title": title,
+                "id": fm.get("id", md_file.stem),
+                "value": fm.get("value", "medium"),
+                "source": fm.get("source", "auto"),
             })
     return out
-
-
-def _extract_title(file_path: Path) -> str:
-    """从 markdown 提取首个 H1，找不到就用 stem"""
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if line.startswith("# "):
-                    return line[2:].strip()
-                if line.startswith("#"):
-                    return line.lstrip("#").strip()
-    except OSError:
-        pass
-    return file_path.stem
