@@ -213,10 +213,20 @@ class ApiProvider(LLMProvider):
 # ==================== host_agent 模式（P3 落地） ====================
 
 class HostAgentProvider(LLMProvider):
-    """通过任务包让宿主 agent 自跑。P3 实现；P2 阶段抛 NotImplementedError 占位。"""
+    """通过任务包让宿主 agent 自跑（P3 落地）。
+
+    run() 不直接调 LLM，而是把 prompt 写入 .pending/<id>.task 后抛 PendingTaskError。
+    distill 主流程捕获该异常 → 仅记 stats（pending_task），不当成 error。
+    宿主 agent 后续通过 MCP 工具消化任务包（见 task_pack.take_next + submit_result）。
+
+    注意：调用方需通过 set_session_context() 提前注入当前 session/project_key，
+    否则任务包元数据会缺失（仍可写入，但 agent 消化时会丢上下文）。
+    """
 
     def __init__(self, cfg: LLMConfig):
         self.cfg = cfg
+        self._session: dict | None = None
+        self._project_key: str | None = None
 
     @property
     def mode(self) -> str:
@@ -225,11 +235,23 @@ class HostAgentProvider(LLMProvider):
     def is_synchronous(self) -> bool:
         return False
 
+    def set_session_context(self, session: dict, project_key: str | None) -> None:
+        """distill 主流程在每个 session 调 run() 之前调一下，注入元数据"""
+        self._session = session
+        self._project_key = project_key
+
     def run(self, prompt: str, *, system: str = "") -> str:
-        raise NotImplementedError(
-            "host_agent 模式将在 P3 实现：写 .pending/<task>.task 并抛 PendingTaskError。\n"
-            "当前 P2 阶段请通过环境变量启用 api 模式：\n"
-            "  export OPENAI_API_KEY=...   # 或 DASHSCOPE_API_KEY"
+        from . import task_pack
+        if self._session is None:
+            # 兜底：用 minimum 元数据
+            session = {"sessionId": "anonymous", "ide": "?", "workspace": ""}
+        else:
+            session = self._session
+        full_prompt = (system + "\n\n" + prompt) if system else prompt
+        task_id = task_pack.write_task(full_prompt, session, self._project_key)
+        raise PendingTaskError(
+            task_id=task_id,
+            task_path=str(task_pack.PENDING_DIR / f"{task_id}.task"),
         )
 
 

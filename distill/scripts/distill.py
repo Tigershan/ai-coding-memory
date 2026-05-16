@@ -185,6 +185,9 @@ def distill_one_session(
         return {"session_id": sid, "kept": 0, "cold": 0, "skipped_reason": "dry-run"}
 
     prompt = render_prompt(session, project_key)
+    # host_agent 需要预先注入 session 上下文给任务包
+    if hasattr(provider, "set_session_context"):
+        provider.set_session_context(session, project_key)
     try:
         out = provider.run(prompt)
     except PendingTaskError as e:
@@ -331,8 +334,8 @@ def cmd_distill(args: argparse.Namespace) -> int:
         return _run_sync(survivors, provider, date_key, resolve_project_key,
                          concurrency=cfg.api_concurrency, verbose=args.verbose)
 
-    # 异步路径（host_agent）：未来 P3 真正的 .pending/ 写入；当前会抛 NotImplementedError
-    print("⚠️  host_agent 模式 P3 落地，当前会回退到逐个 session 调 provider.run（必然抛错）", file=sys.stderr)
+    # 异步路径（host_agent）：写任务包到 .pending/，等宿主 agent 通过 MCP 消化
+    # 必须串行（task_pack.write_task 非线程安全且每次都改 fs），且要顺序保留 session 上下文
     return _run_sync(survivors, provider, date_key, resolve_project_key,
                      concurrency=1, verbose=args.verbose)
 
@@ -350,6 +353,7 @@ def _run_sync(
     total_kept = 0
     total_cold = 0
     total_failed = 0
+    total_pending = 0
 
     def task(s):
         return distill_one_session(
@@ -373,21 +377,32 @@ def _run_sync(
             kept = result.get("kept", 0)
             cold = result.get("cold", 0)
             err = result.get("error")
+            pending_task = result.get("pending_task")
             total_kept += kept
             total_cold += cold
             if err:
                 total_failed += 1
                 append_log(date_key, f"FAILED {result['session_id']}: {err}")
-            elif "pending_task" in result:
-                append_log(date_key, f"PENDING {result['session_id']} → {result['pending_task']}")
+                marker = " err"
+            elif pending_task:
+                total_pending += 1
+                append_log(date_key, f"PENDING {result['session_id']} → {pending_task}")
+                marker = " pending"
             else:
                 append_log(date_key, f"OK {result['session_id']}: kept={kept} cold={cold}")
-            print(f"  [{i}/{len(sessions)}] kept={kept} cold={cold}"
-                  f"{' err' if err else ''}")
+                marker = ""
+            print(f"  [{i}/{len(sessions)}] kept={kept} cold={cold}{marker}")
 
     dur = time.time() - start
-    print(f"\n✓ done in {dur:.1f}s — kept={total_kept} cold={total_cold} failed={total_failed}")
-    return 0 if total_kept > 0 else 1
+    summary = f"kept={total_kept} cold={total_cold} pending={total_pending} failed={total_failed}"
+    print(f"\n✓ done in {dur:.1f}s — {summary}")
+    if total_pending > 0:
+        print(f"💡 {total_pending} 个任务包待消化。"
+              f"在任意 IDE 里说『整理今日记忆』，agent 会通过 MCP 消化。")
+    # 退出码：有 kept 或 pending 都算成功
+    if total_kept > 0 or total_pending > 0:
+        return 0
+    return 1
 
 
 # ==================== argparse ====================
@@ -411,7 +426,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return cmd_distill(args)
+    rc = cmd_distill(args)
+    # 任何"实际跑过的"distill 都更新 .last_distill（lazy trigger 用）
+    if not args.dry_run:
+        try:
+            from core.paths import LAST_DISTILL_PATH, DATA_ROOT
+            DATA_ROOT.mkdir(parents=True, exist_ok=True)
+            LAST_DISTILL_PATH.write_text(f"{time.time()}\n", encoding="utf-8")
+        except Exception:
+            pass
+    return rc
 
 
 if __name__ == "__main__":

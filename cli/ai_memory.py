@@ -210,19 +210,77 @@ def cmd_distill(args: argparse.Namespace) -> int:
     return distill_mod.main(forwarded)
 
 
+def cmd_init(args: argparse.Namespace) -> int:
+    """P3 init - 首次回溯"""
+    from cli.ai_memory_init import cmd_init as _init_impl
+    return _init_impl(args)
+
+
+def cmd_pending(args: argparse.Namespace) -> int:
+    """P3 pending - 看任务包状态"""
+    from cli.ai_memory_init import cmd_pending as _pending_impl
+    return _pending_impl(args)
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """P3 config get/set/show"""
+    from core import config as ucfg
+    action = args.action
+    if action == "show":
+        cfg = ucfg.load_user_config()
+        if not cfg:
+            print(f"（{ucfg.USER_CONFIG_PATH} 不存在或为空）")
+        else:
+            import json
+            print(json.dumps(cfg, ensure_ascii=False, indent=2))
+        return 0
+    if action == "get":
+        if not args.key:
+            print("❌ 缺少 KEY，用法: ai-memory config get llm.mode", file=sys.stderr)
+            return 1
+        v = ucfg.get_value(args.key)
+        if v is None:
+            print(f"（{args.key} 未设置）")
+            return 1
+        print(v)
+        return 0
+    if action == "set":
+        if not args.key or args.value is None:
+            print("❌ 用法: ai-memory config set llm.mode api", file=sys.stderr)
+            return 1
+        # 简易类型推断
+        val: object = args.value
+        if val == "true":
+            val = True
+        elif val == "false":
+            val = False
+        elif val == "null":
+            val = None
+        else:
+            try:
+                val = int(val)
+            except ValueError:
+                try:
+                    val = float(val)
+                except ValueError:
+                    pass
+        p = ucfg.set_value(args.key, val)
+        print(f"✓ {args.key} = {val}")
+        print(f"  写入: {p}")
+        return 0
+    return 1
+
+
 def cmd_not_implemented(args: argparse.Namespace) -> int:
-    """P3-P5 phase 才实现的命令"""
+    """P4-P5 phase 才实现的命令"""
     name = args._cmd_name
     phase = {
-        "init": "P3",
-        "pending": "P3",
-        "config": "P3",
         "stats": "P5",
         "sync-agents-md": "P4",
         "rebuild-index": "P5",
     }.get(name, "未来 phase")
     print(f"⚠️  `ai-memory {name}` 计划在 {phase} 实现", file=sys.stderr)
-    print(f"   当前可用：add / edit / ls / show / archive / restore / distill", file=sys.stderr)
+    print(f"   当前可用：add / edit / ls / show / archive / restore / distill / init / pending / config", file=sys.stderr)
     return 2
 
 
@@ -286,11 +344,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_dist.add_argument("--verbose", action="store_true")
     p_dist.set_defaults(func=cmd_distill)
 
-    # 占位命令（P3-P5）
+    # init - P3 已落地
+    p_init = sub.add_parser("init", help="首次回溯历史对话")
+    p_init.add_argument("--range", default="last-7d",
+                        help="last-7d | last-30d | all | YYYY-MM-DD~YYYY-MM-DD")
+    p_init.add_argument("--mode", choices=["api", "host_agent", "local"])
+    p_init.add_argument("--ide", help="逗号分隔仅处理某些 IDE")
+    p_init.add_argument("--budget-max", type=float, help="api 模式费用上限（元）")
+    p_init.add_argument("--resume", action="store_true", help="从 .init-progress 续跑")
+    p_init.add_argument("--yes", "-y", action="store_true", help="跳过 confirm")
+    p_init.set_defaults(func=cmd_init)
+
+    # pending - P3 已落地
+    p_pend = sub.add_parser("pending", help="看 host_agent 模式的待消化任务包")
+    p_pend.add_argument("--clear-failed", action="store_true", help="清理失败的任务包")
+    p_pend.set_defaults(func=cmd_pending)
+
+    # config - P3 已落地
+    p_cfg = sub.add_parser("config", help="读写 LLM mode 等用户配置")
+    p_cfg.add_argument("action", choices=["show", "get", "set"])
+    p_cfg.add_argument("key", nargs="?", help="如 llm.mode")
+    p_cfg.add_argument("value", nargs="?", help="set 时必填")
+    p_cfg.set_defaults(func=cmd_config)
+
+    # 占位命令（P4-P5）
     for name, helptext in [
-        ("init", "[P3] 首次回溯历史对话"),
-        ("pending", "[P3] 看 host_agent 模式的待消化任务包"),
-        ("config", "[P3] 读写 LLM mode 等用户配置"),
         ("stats", "[P5] 召回反馈 / 写入 / 采纳统计"),
         ("sync-agents-md", "[P4] 把项目摘要同步到 AGENTS.md"),
         ("rebuild-index", "[P5] 升级到 SQLite FTS5 索引"),

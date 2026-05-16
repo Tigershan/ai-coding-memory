@@ -1,18 +1,18 @@
 #!/bin/bash
-# install.sh - ai-coding-memory 一键安装脚本
+# install.sh - ai-coding-memory 一键安装脚本（redesign v1.2）
 #
-# 做什么：
-#   1. 初始化 git submodule（fork 的 llm-wiki-skill）
-#   2. 创建数据目录（~/.ai-memory/...）
-#   3. 复制默认配置
-#   4. 安装 Python 依赖（FastMCP、PyYAML 等）
-#   5. 检查 llm-wiki-skill 的系统依赖（jq、node）
-#   6. 把 MCP 配置注入到 Cursor / Aone Copilot / Qoder
+# 步骤：
+#   1. 创建数据目录（~/.ai-memory/...）
+#   2. 检查/安装 Python 依赖（FastMCP、PyYAML）
+#   3. 注入 MCP 配置到 Cursor / Aone Copilot / Claude Code
+#   4. 安装统一 skill 包到 IDE skills 目录
+#   5. 询问 LLM mode（host_agent 默认 / api 可选；ADR-10 C 方案）
+#   6. 询问是否现在初始化记忆库（三档预设）
 #
+# 跨平台：macOS / Linux 通用；Windows 暂未支持
+# 非交互：传 INSTALL_NONINTERACTIVE=1 跳过 step 5/6 的提示
 # 失败模式：
-#   - submodule 拉取失败 → 提示用户检查 git/网络（不退出，便于用户先开发）
 #   - pip 安装失败 → 提示用户切换镜像源
-#   - 系统依赖缺失（jq/node）→ 给出 brew 安装命令但不退出
 #   - MCP 配置注入失败（IDE 未安装）→ 仅警告，不退出
 
 set -e
@@ -32,13 +32,10 @@ PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DATA_ROOT="${HOME}/.ai-memory"
 
 info "🚀 Installing ai-coding-memory at ${PROJECT_ROOT}"
-
-# [P0 NOTE] redesign.md ADR-3 后已无 llm-wiki submodule。原 Step 1 已废弃。
-# [P3 TODO] 本脚本将整体重写，加入 LLM mode 询问 (host_agent / api / local)
-# 和首次 init 集成（见 redesign.md §6.0 / §6.5）。
+echo ""
 
 # ---- Step 1: 创建数据目录 ----
-info "📁 Step 1/4: Creating data directories at ${DATA_ROOT}..."
+info "📁 Step 1/6: Creating data directories at ${DATA_ROOT}..."
 mkdir -p "${DATA_ROOT}/personal"
 mkdir -p "${DATA_ROOT}/projects"
 mkdir -p "${DATA_ROOT}/.cold"
@@ -51,7 +48,7 @@ mkdir -p "${DATA_ROOT}/logs"
 info "  ✓ data root ready"
 
 # ---- Step 2: 安装 Python 依赖（智能跳过：已具备 → 不重装） ----
-info "🐍 Step 2/4: Checking Python environment..."
+info "🐍 Step 2/6: Checking Python environment..."
 
 REQUIRED_PY_MAJOR=3
 REQUIRED_PY_MINOR=10
@@ -116,8 +113,7 @@ else
 fi
 
 # ---- Step 3: 注入 MCP 配置 ----
-# [P0 NOTE] jq/node 系统依赖检查已删（ADR-3 砍 graph 后不再需要）
-info "🔌 Step 3/4: Configuring MCP servers..."
+info "🔌 Step 3/6: Configuring MCP servers..."
 if [ -f "${PROJECT_ROOT}/scripts/inject_mcp_config.py" ]; then
     for ide_config in \
         "${HOME}/.cursor/mcp.json" \
@@ -139,7 +135,7 @@ else
 fi
 
 # ---- Step 4: 把统一 skill 包安装到 IDE skills 目录 ----
-info "🧠 Step 4/4: Installing unified skill package to IDE skills directories..."
+info "🧠 Step 4/6: Installing unified skill package to IDE skills directories..."
 SKILL_SRC="${PROJECT_ROOT}/skill"
 SKILL_NAME="ai-coding-memory"
 
@@ -210,12 +206,101 @@ else
     fi
 fi
 
+# ---- Step 5: LLM mode 询问（redesign §6.0 / ADR-10 C 方案） ----
+echo ""
+info "⚙️  Step 5/6: LLM mode 配置"
+
+# 检测已有的 API key 环境变量
+DETECTED_KEY=""
+for env_name in OPENAI_API_KEY DASHSCOPE_API_KEY AI_MEMORY_LLM_API_KEY; do
+    if [ -n "${!env_name:-}" ]; then
+        DETECTED_KEY="$env_name"
+        break
+    fi
+done
+
+if [ -n "$DETECTED_KEY" ]; then
+    echo "    检测到环境变量 ${DETECTED_KEY}（值已忽略）"
+fi
+
+echo "    LLM 提供两档来源："
+echo "      1) host_agent (推荐, 零成本, 零配置)"
+echo "         IDE 自己的 AI 用它的 LLM 跑蒸馏 (说『整理今日记忆』触发)"
+echo "      2) api (自动后台运行, 消耗 ${DETECTED_KEY:-API 配额})"
+echo "         lazy trigger 用 OpenAI-compatible API 后台静默跑"
+
+if [ "${INSTALL_NONINTERACTIVE:-0}" = "1" ]; then
+    LLM_CHOICE=1
+    info "    NONINTERACTIVE: 默认选 host_agent"
+else
+    if [ -n "$DETECTED_KEY" ]; then
+        printf "    选择 [1=host_agent / 2=api]: "
+    else
+        printf "    选择 [1=host_agent / 2=api(需先 export 一个 API key)]: "
+    fi
+    read -r LLM_CHOICE
+    LLM_CHOICE="${LLM_CHOICE:-1}"
+fi
+
+case "$LLM_CHOICE" in
+    2)
+        if [ -z "$DETECTED_KEY" ]; then
+            warn "    没检测到 API key 环境变量，仍然写入 api 模式；用前请 export DASHSCOPE_API_KEY 或 OPENAI_API_KEY"
+        fi
+        python3 "${PROJECT_ROOT}/cli/ai_memory.py" config set llm.mode api >/dev/null 2>&1
+        info "    ✓ 已写入 llm.mode=api"
+        ;;
+    *)
+        python3 "${PROJECT_ROOT}/cli/ai_memory.py" config set llm.mode host_agent >/dev/null 2>&1
+        info "    ✓ 已写入 llm.mode=host_agent（零成本）"
+        ;;
+esac
+
+# ---- Step 6: 首次 init 询问（redesign §6.5.4） ----
+echo ""
+info "🗂  Step 6/6: 是否现在初始化记忆库？"
+echo "    扫描所有 IDE 历史会话，蒸馏成可召回的 memory。"
+echo "    选项："
+echo "      1) 最近 7 天   (推荐, 几分钟)"
+echo "      2) 最近 30 天  (约 15-20 分钟)"
+echo "      3) 全部历史   (先估算再确认)"
+echo "      4) 跳过, 以后再说"
+
+if [ "${INSTALL_NONINTERACTIVE:-0}" = "1" ]; then
+    INIT_CHOICE=4
+    info "    NONINTERACTIVE: 跳过 init"
+else
+    printf "    选择 [4]: "
+    read -r INIT_CHOICE
+    INIT_CHOICE="${INIT_CHOICE:-4}"
+fi
+
+case "$INIT_CHOICE" in
+    1)
+        info "    跑 ai-memory init --range last-7d --yes ..."
+        python3 "${PROJECT_ROOT}/cli/ai_memory.py" init --range last-7d --yes || warn "init 失败，可稍后手动重跑"
+        ;;
+    2)
+        info "    跑 ai-memory init --range last-30d --yes ..."
+        python3 "${PROJECT_ROOT}/cli/ai_memory.py" init --range last-30d --yes || warn "init 失败，可稍后手动重跑"
+        ;;
+    3)
+        info "    跑 ai-memory init --range all（会先估算让你确认）..."
+        python3 "${PROJECT_ROOT}/cli/ai_memory.py" init --range all || warn "init 取消或失败"
+        ;;
+    *)
+        info "    已跳过 init。后续可随时跑：ai-memory init [--range last-7d]"
+        ;;
+esac
+
 echo ""
 info "✅ Installation complete!"
 echo ""
 echo "📋 Next steps:"
-echo "  1. 编辑 ${USER_CONFIG} 配置你的领域映射"
-echo "  2. 在 QoderWork 中导入 workflows/qoderwork-daily.yml 设置定时任务"
-echo "  3. 重启 IDE 让 MCP Server + skill 生效"
-echo "  4. 在 IDE 里说一句「整理今天的记忆」让 AI 自动跑完整 pipeline"
-echo "  5. 也可手动试运行：python3 ${PROJECT_ROOT}/collect/scripts/extract_sessions.py --range today --verbose"
+echo "  1. 重启 IDE，让 MCP Server + skill 生效"
+echo "  2. 在 IDE 里说一句『记住这个：...』，验证 remember 工具"
+echo "  3. 切到另一个 IDE 提相同问题，验证跨 IDE 召回"
+echo ""
+echo "📚 CLI 入口："
+echo "  python3 ${PROJECT_ROOT}/cli/ai_memory.py --help"
+echo "  常用：ls / show / edit / archive / distill / init / pending / config / stats"

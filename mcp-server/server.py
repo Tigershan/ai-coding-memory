@@ -43,8 +43,18 @@ except ImportError:
     )
     sys.exit(2)
 
-from lib import config_loader, scope_resolver, searcher, workspace_detector  # noqa: E402
+from lib import config_loader, lazy_trigger, scope_resolver, searcher, workspace_detector  # noqa: E402
 from lib.paths_ext import DATA_ROOT, WIKI_ROOT  # noqa: E402
+
+# 让 core.* 可导入（项目根目录）
+PROJECT_ROOT = SCRIPT_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core import memory_store as ms  # noqa: E402
+from core import task_pack  # noqa: E402
+from core.memory_store import Memory  # noqa: E402
+from core.project_key import resolve_project_key  # noqa: E402
 
 # Load config once at startup (repo default.yml -> user override -> AI_MEMORY_* env)
 _CFG = config_loader.load_config()
@@ -234,6 +244,222 @@ def list_topics(scope: str = "auto") -> str:
     return "\n".join(lines)
 
 
+# ==================== 写入组（不需要 LLM） ====================
+
+@mcp.tool()
+def remember(text: str, scope: str = "auto", tags: list[str] = None,
+             workspace: str = None, value: str = "medium") -> str:
+    """让用户在任意 IDE 把当前对话片段固化为 memory，立即落盘下一秒任意 IDE 可召回。
+
+    TRIGGER（典型用户表述）：
+        - "记住这个 X"
+        - "这个要记下来"
+        - "永远不要再这样做"
+        - "以后都按 X 处理"
+        - "把这个加到 memory 里"
+        - "save this as a rule"
+
+    参数：
+        text      : 用户要记住的内容（原话或你（agent）总结后的精炼版本）。
+                    内容首行没有 # 标题时，会自动从前 30 字生成标题。
+        scope     : "auto"（推荐）/ "personal" / "project"
+                    auto: workspace 在 git 仓库内 → project；否则 personal
+        tags      : 3-5 个 kebab-case 关键词，用于跨项目相关性匹配
+        workspace : IDE 当前打开的工作区路径（必传以保证 scope 准确）
+        value     : "high" | "medium"（默认） | "low"
+
+    返回：写入的文件路径（用户可直接打开编辑）+ memory id。
+    用户体验：明确告诉用户保存在哪里，建立可控感（人改优先原则 ADR-6）。
+    """
+    if not text or not text.strip():
+        return "❌ remember 失败：text 为空"
+
+    # 解析 scope
+    effective_scope = scope
+    project_key = None
+    if scope == "auto":
+        if workspace:
+            info = resolve_project_key(workspace)
+            if info:
+                project_key = info["key"]
+                effective_scope = "project"
+            else:
+                effective_scope = "personal"
+        else:
+            effective_scope = "personal"
+    elif scope == "project":
+        if workspace:
+            info = resolve_project_key(workspace)
+            if info:
+                project_key = info["key"]
+            else:
+                # scope=project 但 workspace 不在 git 中：兜底 personal
+                effective_scope = "personal"
+    # personal: 不需要 project_key
+
+    # 标题提取：用户写了 # 就用第一行；否则用前 30 字
+    body = text.strip()
+    title = ""
+    first_line = body.splitlines()[0] if body else ""
+    if first_line.startswith("#"):
+        title = first_line.lstrip("#").strip()
+    else:
+        title = first_line[:30].strip() or "memory"
+        body = f"# {title}\n\n{body}"
+
+    if value not in ("high", "medium", "low"):
+        value = "medium"
+
+    mem = Memory(
+        id=ms.make_id(title),
+        scope=effective_scope,
+        title=title,
+        body=body,
+        project_key=project_key,
+        source="manual",
+        value=value,
+        tags=[t for t in (tags or []) if isinstance(t, str)][:6],
+        origin={"ide": "mcp-remember", "workspace": workspace or ""},
+    )
+    try:
+        path = ms.save(mem)
+    except Exception as e:
+        return f"❌ remember 落盘失败：{e}"
+
+    return (
+        f"✓ 已记住：`{mem.id}`\n"
+        f"  scope=`{mem.scope}`{', project_key=`' + project_key + '`' if project_key else ''}\n"
+        f"  value=`{mem.value}` tags=`{mem.tags}`\n"
+        f"  📄 文件：`{path}`\n"
+        f"  💡 用户可随时 `$EDITOR` 打开此文件修改，下次 pipeline 不会覆盖（人改优先）。"
+    )
+
+
+@mcp.tool()
+def forget(memory_id: str) -> str:
+    """软删除一条 memory（移到 archive/，可 restore）。
+
+    TRIGGER：用户说「忘掉那条 X」「这条已经过时了」「archive 这个 memory」时。
+
+    参数：
+        memory_id : memory 的完整 id（如 2026-05-16-redis-evalsha-abcd）。
+                    用户给出部分 id 时，请通过 search_memory 先确认完整 id。
+
+    返回：归档路径 + 恢复命令。
+    安全：不删除文件，只移到 archive/，可通过 ai-memory restore 恢复。
+    """
+    p = ms.archive(memory_id)
+    if p is None:
+        return f"❌ 未找到 memory id：`{memory_id}`"
+    return (
+        f"✓ 已归档：`{memory_id}`\n"
+        f"  📄 archive 路径：`{p}`\n"
+        f"  💡 恢复命令：`ai-memory restore {memory_id}`"
+    )
+
+
+# ==================== distill 任务包组（host_agent 模式专用） ====================
+
+@mcp.tool()
+def pending_distill_count() -> str:
+    """返回 host_agent 模式下待蒸馏的任务包数（不调 LLM、毫秒级）。
+
+    TRIGGER：
+        - 用户说「整理今日记忆」「跑一遍 pipeline」「distill 一下」时，先调本工具看是否有待消化
+        - 用户开始新 chat 时，可主动调一次；如果 > 0 应告知用户「你有 N 个待整理」
+        - 用户问「有什么要整理的吗」时
+
+    返回：人类可读的状态描述。示例：
+        "有 32 个待整理任务（最早 2 小时前）" 或 "暂无待整理任务"
+    """
+    items = task_pack.list_pending(include_in_progress=False)
+    if not items:
+        in_prog = [x for x in task_pack.list_pending(include_in_progress=True)
+                   if x["status"] == "in_progress"]
+        if in_prog:
+            return f"暂无新待整理任务；{len(in_prog)} 个任务正在消化中。"
+        return "暂无待整理任务"
+    n = len(items)
+    oldest = items[0]
+    age_min = oldest["age_seconds"] // 60
+    age_desc = f"{age_min} 分钟前" if age_min < 60 else f"{age_min // 60} 小时前"
+    return (
+        f"📥 有 {n} 个待整理任务（最早 {age_desc}）。\n"
+        f"  消化流程：\n"
+        f"  1) 调 get_next_distill_task() 拿到 prompt + task_id\n"
+        f"  2) 用你（宿主 agent）自己的 LLM 跑这个 prompt\n"
+        f"  3) 把 YAML 结果通过 submit_distill_result(task_id, result) 提交\n"
+        f"  4) 重复 1-3 直到返回 \"暂无待整理任务\""
+    )
+
+
+@mcp.tool()
+def get_next_distill_task() -> str:
+    """取下一个待蒸馏任务（原子操作，多 agent 并发安全），返回完整 prompt。
+
+    使用步骤（loop 模式）：
+      1. 调本工具 → 拿到 `task_id` 和 `prompt`
+      2. 用你（宿主 agent）自己的 LLM 跑这个 prompt，得到 YAML 输出
+      3. 调 submit_distill_result(task_id, result_yaml) 提交
+      4. 循环直到 pending_distill_count 返回 "暂无待整理任务"
+
+    返回格式：
+        TASK_ID: <12 位 hex>
+        SESSION_META: <ide / workspace / project_key 摘要>
+        PROMPT_START
+        <完整 prompt 内容>
+        PROMPT_END
+
+    不要把 PROMPT_START/PROMPT_END 标记之间的内容发回给 user —— 那是给你自跑用的。
+    """
+    task = task_pack.take_next()
+    if task is None:
+        return "暂无待整理任务"
+    return (
+        f"TASK_ID: {task['task_id']}\n"
+        f"SESSION_META: ide={task.get('ide','?')} workspace={task.get('workspace','')} "
+        f"project_key={task.get('project_key','null')}\n"
+        f"PROMPT_START\n"
+        f"{task.get('prompt','')}\n"
+        f"PROMPT_END"
+    )
+
+
+@mcp.tool()
+def submit_distill_result(task_id: str, result_yaml: str) -> str:
+    """提交某个 distill 任务的 YAML 结果，服务端落盘到 memory 库。
+
+    result_yaml 必须是 1-step distill prompt 规定的格式（外层 `topics:` 数组）。
+    服务端会：
+      - 按 should_keep 落盘到 personal/ projects/ 或 .cold/
+      - 写完后删除 .pending/<task_id>.task.in_progress
+      - 已被人手编辑（source=manual/edited）的同 ID 文件会被保护不覆盖
+
+    返回：写入文件路径列表 + 错误（如有）。
+    """
+    if not task_id or not result_yaml:
+        return "❌ 缺少 task_id 或 result_yaml"
+    result = task_pack.submit_result(task_id, result_yaml)
+    written = result.get("written") or []
+    cold = result.get("cold") or []
+    errors = result.get("errors") or []
+    lines = [
+        f"✓ submit_distill_result({task_id}):",
+        f"  📝 写入 memory: {len(written)}",
+    ]
+    for p in written[:5]:
+        lines.append(f"    - {p}")
+    if cold:
+        lines.append(f"  🧊 进冷存储: {len(cold)}")
+        for p in cold[:3]:
+            lines.append(f"    - {p}")
+    if errors:
+        lines.append(f"  ⚠️  错误: {len(errors)}")
+        for e in errors[:3]:
+            lines.append(f"    - {e}")
+    return "\n".join(lines)
+
+
 # ==================== 自检 / 调试 ====================
 
 def _self_check() -> int:
@@ -261,13 +487,36 @@ def _self_check() -> int:
             "sources": _CFG.sources,
             "warnings": _CFG.warnings,
         },
-        "tools": ["search_memory", "read_page", "list_topics"],
+        "tools": [
+            # 召回组
+            "search_memory", "read_page", "list_topics",
+            # 写入组
+            "remember", "forget",
+            # distill 任务包组（host_agent 模式）
+            "pending_distill_count", "get_next_distill_task", "submit_distill_result",
+        ],
+        "pending_distill_count": task_pack.count_pending(),
     }, ensure_ascii=False, indent=2))
     return 0
+
+
+def _maybe_trigger_lazy_distill() -> None:
+    """启动时静默触发 lazy distill（失败不阻塞 MCP 启动）"""
+    try:
+        result = lazy_trigger.maybe_trigger_background(range_arg="yesterday")
+        if result["triggered"]:
+            sys.stderr.write(
+                f"[ai-coding-memory] lazy distill triggered (pid={result['pid']})\n"
+            )
+    except Exception as e:
+        # 不让 lazy trigger 失败阻塞 MCP 启动
+        sys.stderr.write(f"[ai-coding-memory] lazy trigger skipped: {e}\n")
 
 
 if __name__ == "__main__":
     if "--self-check" in sys.argv:
         raise SystemExit(_self_check())
+    # 启动时尝试 lazy distill（fork-and-forget）
+    _maybe_trigger_lazy_distill()
     # 默认：启动 MCP（FastMCP 默认 stdio 协议）
     mcp.run()
