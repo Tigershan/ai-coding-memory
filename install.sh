@@ -114,19 +114,36 @@ fi
 # ---- Step 3: 注入 MCP 配置 ----
 info "🔌 Step 3/6: Configuring MCP servers..."
 if [ -f "${PROJECT_ROOT}/scripts/inject_mcp_config.py" ]; then
-    for ide_config in \
-        "${HOME}/.cursor/mcp.json" \
-        "${HOME}/.aone_copilot/mcp.json" \
-        "${HOME}/Library/Application Support/Qoder/User/mcp.json"; do
-        ide_dir=$(dirname "$ide_config")
-        if [ -d "$ide_dir" ]; then
-            if python3 "${PROJECT_ROOT}/scripts/inject_mcp_config.py" \
-                --target "$ide_config" \
-                --project-root "$PROJECT_ROOT" 2>/dev/null; then
-                info "  ✓ Configured: $ide_config"
-            else
-                warn "  ✗ 注入失败: $ide_config"
-            fi
+    # 注入目标的"父目录探测"逻辑：
+    #   - 独立 mcp.json 文件 → 父目录存在即视为 IDE 已装
+    #   - Claude Code 的 ~/.claude.json → 文件本身存在即视为已装（user profile）
+    declare -a IDE_TARGETS=(
+        "${HOME}/.cursor/mcp.json"
+        "${HOME}/.aone_copilot/mcp.json"
+        "${HOME}/Library/Application Support/Qoder/User/mcp.json"
+        "${HOME}/.claude.json"   # Claude Code: mcpServers 嵌套在 user profile 里
+    )
+    declare -a IDE_LABELS=(
+        "Cursor"
+        "Aone Copilot"
+        "Qoder"
+        "Claude Code"
+    )
+    for i in "${!IDE_TARGETS[@]}"; do
+        target="${IDE_TARGETS[$i]}"
+        label="${IDE_LABELS[$i]}"
+        # ~/.claude.json 是文件本身；其他三个是父目录里的 mcp.json
+        if [ "$target" = "${HOME}/.claude.json" ]; then
+            [ -f "$target" ] || { info "  · ${label} 未安装，跳过"; continue; }
+        else
+            [ -d "$(dirname "$target")" ] || { info "  · ${label} 未安装，跳过"; continue; }
+        fi
+        if python3 "${PROJECT_ROOT}/scripts/inject_mcp_config.py" \
+            --target "$target" \
+            --project-root "$PROJECT_ROOT" >/dev/null 2>&1; then
+            info "  ✓ ${label}: $target"
+        else
+            warn "  ✗ ${label} 注入失败: $target"
         fi
     done
 else
@@ -295,11 +312,56 @@ esac
 echo ""
 info "✅ Installation complete!"
 echo ""
-echo "📋 Next steps:"
-echo "  1. 重启 IDE，让 MCP Server + skill 生效"
-echo "  2. 在 IDE 里说一句『记住这个：...』，验证 remember 工具"
-echo "  3. 切到另一个 IDE 提相同问题，验证跨 IDE 召回"
+
+# ---- 准备 handover：根据当前状态生成"启动咒语"，自动复制到剪贴板 ----
+PENDING_COUNT=$(ls "${DATA_ROOT}/.pending"/*.task 2>/dev/null | wc -l | tr -d ' ')
+
+# 三种场景的不同启动咒语
+if [ "${PENDING_COUNT:-0}" -gt 0 ]; then
+    SPELL="我刚装了 ai-coding-memory。请调 mcp__ai-coding-memory__pending_distill_count 看待消化任务，然后按返回的指引循环消化（建议每次 5-10 个就停下问我『继续吗』）。"
+    HANDOVER_HINT="你有 ${PENDING_COUNT} 个待消化任务包，下一步是让 IDE 里的 agent 帮你跑完。"
+elif [ "$INIT_CHOICE" = "4" ]; then
+    SPELL="我刚装了 ai-coding-memory。请调 mcp__ai-coding-memory__pending_distill_count 验证 MCP 连通；然后说几个最近遇到的技术决策，让我帮你 remember。"
+    HANDOVER_HINT="你跳过了 init，记忆库还是空的。可以先 remember 几条试试效果，或者后续再 ai-memory init。"
+else
+    SPELL="我刚装了 ai-coding-memory。请调 mcp__ai-coding-memory__list_topics 看看蒸馏出的 memory，然后帮我从中找 1-2 条最有价值的 highlight 给我看。"
+    HANDOVER_HINT="init 已跑完，现在可以让 IDE 帮你 review 蒸馏结果了。"
+fi
+
+# 尝试拷贝到剪贴板（macOS pbcopy / Linux xclip / wl-copy）
+COPY_OK=0
+if command -v pbcopy >/dev/null 2>&1; then
+    printf "%s" "$SPELL" | pbcopy && COPY_OK=1
+elif command -v xclip >/dev/null 2>&1; then
+    printf "%s" "$SPELL" | xclip -selection clipboard && COPY_OK=1
+elif command -v wl-copy >/dev/null 2>&1; then
+    printf "%s" "$SPELL" | wl-copy && COPY_OK=1
+fi
+
+# ---- ASCII 大字提示重启 IDE + 启动咒语 ----
+echo "═══════════════════════════════════════════════════════════════"
+echo "  ⚠️  下一步：重启 IDE 让 MCP 生效（必须）"
+echo ""
+echo "    Claude Code:  Cmd+Q → 重新打开"
+echo "    Cursor:       Cmd+Shift+P → \"Developer: Reload Window\""
+echo "    Aone Copilot: 关闭 IDEA → 重开"
+echo "    Qoder:        Cmd+Q → 重新打开"
+echo ""
+echo "  📋 重启后，开新 chat 粘贴这条作为第一句话："
+if [ "$COPY_OK" = "1" ]; then
+    echo "      （已自动复制到剪贴板，直接 Cmd+V 即可）"
+fi
+echo ""
+echo "  > $SPELL"
+echo ""
+echo "  💡 $HANDOVER_HINT"
+echo "═══════════════════════════════════════════════════════════════"
 echo ""
 echo "📚 CLI 入口："
 echo "  python3 ${PROJECT_ROOT}/cli/ai_memory.py --help"
 echo "  常用：ls / show / edit / archive / distill / init / pending / config / stats"
+echo ""
+echo "📖 文档："
+echo "  README.md           — 概览 + 三通道心智模型"
+echo "  docs/redesign.md    — 完整设计文档"
+echo "  docs/p6-reflect-design.md  — 未来路线（reflect/合并）"

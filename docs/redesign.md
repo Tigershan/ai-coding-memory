@@ -17,7 +17,16 @@
 
 ### Changelog
 
-- **v1.3**（本版本，实施期 hot-fix）：移除 `.cold/` 冷存储概念。should_keep=false 的 topic 直接丢弃，仅日志保留审计信息。修订 ADR-8。理由：实测一周数据 LLM 判 false 准确率高 + restore 路径几乎无人走 + raw/sessions 已是更可靠兜底，cold 是过度设计。
+- **v1.4**（本版本，UX hardening pass）：对照"用户第一次下载到第一次 aha moment"动线做整体 review，落地 6 项改进：
+  - **阻塞 #1**：`scripts/inject_mcp_config.py` + `install.sh` 加 Claude Code (~/.claude.json) 自动注入分支 —— 之前 Anthropic 用户开箱不可用
+  - **阻塞 #2 + 体验 #3**：`install.sh` 末尾换成 ASCII 重启提示框 + 启动咒语 + 自动 pbcopy 到剪贴板（macOS / Linux 兼容），用户重启 IDE 后 Cmd+V 就有清晰第一句话
+  - **阻塞 #3**：`get_next_distill_task` docstring 改成"分批 5-10 + 停下问询"模式，明确告知 agent 不要无限循环；配合 user/linter 并行加的 `distill_quota`（每日上限 + 顺延次日）和 `_build_pending_distill_hint`（每次 `project_context` 顺手消化 1 条）
+  - **体验 #4**：`search_memory` 库为空时自动给出可执行下一步（`ai-memory init` / `remember` / `pending` 提示）
+  - **体验 #6**：`ai-memory stats` pending ≥ 50 黄色警告、≥ 100 红色警告 + 推荐动作
+  - **体验 #7**：README 整体重写，加"三通道心智模型"ASCII 图，对齐 redesign（移除 llm-wiki / domain / qoderwork 等已废弃概念）
+  - **新增 onboarding skill 流程**：`skill/SKILL.md` 加角色 A（Onboarding 验证者）和角色 B（批量消化器）双流程 + 严格 anti-loop 约束。同时把 SKILL.md 整体重写对齐 redesign（之前还停在 v0.3 的 4-step pipeline）
+
+- **v1.3**：移除 `.cold/` 冷存储概念。should_keep=false 的 topic 直接丢弃，仅日志保留审计信息。修订 ADR-8。理由：实测一周数据 LLM 判 false 准确率高 + restore 路径几乎无人走 + raw/sessions 已是更可靠兜底，cold 是过度设计。
 - **v1.2**：吸收开源方案借鉴。新增 AGENTS.md 双写通道（覆盖不支持 MCP 的 agent，ADR-11）；新增轻量冲突检测（避免"过期规则被召回，比没记忆更危险"，ADR-12）；召回引擎中间台阶改为 SQLite FTS5；reflect/合并机制列入待定（P6 候选）。
 - **v1.1**：引入 LLM Provider 抽象层。LLM 不再是基础设施依赖，而是按优先级注入的能力。`host_agent` 模式（用宿主 agent 自跑，零配置）成为默认。修订 ADR-2/5/7，新增 ADR-10。distill 双模式落地（任务包 vs 后台 auto）。
 - **v1.0**：首版，对齐"跨 agent 个人/项目 memory"核心目的，砍掉 domain/graph/llm-wiki fork。

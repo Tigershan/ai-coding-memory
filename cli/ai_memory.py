@@ -323,8 +323,19 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(f"   ⚠️ 含 potential_conflicts: {with_conflicts}  "
               f"被标 superseded: {with_superseded}")
     print()
+    # 体验 #6：pending 堆积告警
+    pending_marker = "📥"
+    pending_extra = ""
+    if pending >= 100:
+        pending_marker = "🔴 pending"
+        pending_extra = "  ⚠️ 堆积过多！打开 IDE 让 agent 消化（说『整理今日记忆』）；7 天未消化会自动清理"
+    elif pending >= 50:
+        pending_marker = "🟡 pending"
+        pending_extra = "  💡 可在 IDE 里说『整理今日记忆』让 agent 消化"
     print(f"📦 archive: {archive_count}    "
-          f"📥 pending tasks: {pending}    🚫 启发式过滤累计: {filter_count}")
+          f"{pending_marker} tasks: {pending}    🚫 启发式过滤累计: {filter_count}")
+    if pending_extra:
+        print(pending_extra)
     print()
     print(f"🔍 召回（过去 {stats['since_days']} 天）")
     print(f"   search 调用: {stats['n_search']}")

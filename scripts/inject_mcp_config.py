@@ -2,12 +2,13 @@
 """inject_mcp_config.py - 把 ai-coding-memory MCP server 注入到 IDE 配置
 
 支持的 IDE / 配置路径（macOS）：
-    Cursor       :  ~/.cursor/mcp.json
-    Aone Copilot :  ~/.aone_copilot/mcp.json
+    Cursor       :  ~/.cursor/mcp.json                 （独立 mcp.json 文件）
+    Aone Copilot :  ~/.aone_copilot/mcp.json           （独立 mcp.json 文件）
     Qoder        :  ~/Library/Application Support/Qoder/User/mcp.json
+    Claude Code  :  ~/.claude.json                     （user profile，含 mcpServers 嵌套字段）
 
 注入策略：
-    - 已有 mcp.json   → 解析后合并（不覆盖其他 server）
+    - 已有 mcp.json / claude.json → 解析后合并（不覆盖其他 server / 不动 profile 中的其他字段）
     - 已有同名 server → 用最新版覆盖（version-bump 友好）
     - 写入前自动备份  → <target>.bak.<timestamp>
     - JSON 解析失败  → 报错退出，不破坏现有配置
@@ -34,6 +35,9 @@ KNOWN_IDE_CONFIGS = {
     "cursor": "~/.cursor/mcp.json",
     "aone-copilot": "~/.aone_copilot/mcp.json",
     "qoder": "~/Library/Application Support/Qoder/User/mcp.json",
+    # Claude Code 把 mcpServers 放在 user profile 里。_merge_server 已能识别"已有
+    # mcpServers"分支，会只动该字段不破坏其他设置（theme / numStartups / 等）。
+    "claude-code": "~/.claude.json",
 }
 
 

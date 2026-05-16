@@ -83,10 +83,39 @@ mcp = FastMCP(
 
 # ==================== 内部工具 ====================
 
+def _count_total_memories() -> int:
+    """统计 personal + projects 下 .md 总数（不含 archive）"""
+    from core.paths import PERSONAL_DIR, PROJECTS_DIR
+    n = 0
+    if PERSONAL_DIR.exists():
+        n += sum(1 for _ in PERSONAL_DIR.glob("*.md"))
+    if PROJECTS_DIR.exists():
+        n += sum(1 for _ in PROJECTS_DIR.rglob("*.md"))
+    return n
+
+
 def _safe_render_search_results(results: list[dict]) -> str:
     """把 search 结果渲染为 Markdown 文本（IDE 友好）"""
     if not results:
-        return "_未在你的个人知识库中找到相关条目_"
+        # 体验 #4：库为空 / 极少时给出可执行下一步，避免用户怀疑 MCP 没工作
+        try:
+            total = _count_total_memories()
+            pending = task_pack.count_pending()
+        except Exception:
+            total, pending = -1, -1
+        msg = "_未在你的个人知识库中找到相关条目_"
+        if total >= 0 and total < 5:
+            hints = [
+                "",
+                f"💡 你的知识库目前只有 **{total}** 条 memory。可以：",
+                "   • 跑 `ai-memory init --range last-7d` 回溯最近一周对话",
+                "   • 或在对话中说『记住这个 X』主动添加",
+            ]
+            if pending > 0:
+                hints.append(f"   • 你还有 **{pending}** 个待消化任务包，"
+                             "说『整理今日记忆』让 agent 帮你跑")
+            msg += "\n" + "\n".join(hints)
+        return msg
     lines: list[str] = []
     for i, r in enumerate(results, 1):
         snippet = r.get("snippet", "")
@@ -540,11 +569,19 @@ def pending_distill_count() -> str:
 def get_next_distill_task(force: bool = False) -> str:
     """取下一个待蒸馏任务（原子操作，多 agent 并发安全），返回完整 prompt。
 
-    使用步骤（loop 模式）：
-      1. 调本工具 → 拿到 `task_id` 和 `prompt`
-      2. 用你（宿主 agent）自己的 LLM 跑这个 prompt，得到 YAML 输出
-      3. 调 submit_distill_result(task_id, result_yaml) 提交
-      4. 循环直到 pending_distill_count 返回 "暂无待整理任务" 或 "今日额度已用尽"
+    🚫 **不要无限循环消化**。三种场景对应不同节奏：
+
+    场景 A（被 project_context 静默触发，启动时顺手 1 条）：
+        只跑 1 条，提交后**停下**，回到用户主问题。绝不连续 take 第 2 条。
+
+    场景 B（用户显式喊「整理今日记忆」/「批量消化」）：
+        每次 take 5-10 条上限，跑完后**停下问用户**「继续吗？还剩 N 条」。
+        用户说继续才再 loop 5-10 条。**绝不一次 loop 到 pending=0**——
+        会爆 chat 上下文、烧光 IDE LLM 配额，subagent 实测 35/66 时被 quota 砍掉。
+
+    场景 C（用户喊「全部跑完」/「force」）：
+        传 force=True 突破当日上限；agent 仍按 5-10 一批节奏跑、每批问一次。
+        提醒用户："这会消耗较多 IDE 配额，建议分多次"。
 
     参数：
         force : 突破当日消化上限。默认 False，超出 daily_cap 时拒绝并提示「明天继续」。

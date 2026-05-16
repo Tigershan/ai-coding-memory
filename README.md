@@ -1,14 +1,44 @@
 # ai-coding-memory
 
-> 个人 AI 编码记忆系统。零配置、自动化、跨 IDE、有分层意识。
+> 跨 coding agent 的个人 / 项目 memory。
+> 你和 AI 说过的每一句话都不会白费 —— 跨 IDE 共享，永久可召回，永远可改。
 
-把每天与 **Aone Copilot / Cursor / Qoder** 的对话沉淀为结构化、分层、可召回的个人知识库——让 AI 真正"记得"你做过什么、踩过什么坑、学到过什么。
+把每天与 **Cursor / Claude Code / Aone Copilot / Qoder** 的对话，自动沉淀成可读、可改、可召回的 markdown 笔记——任意 IDE 都能搜到。
 
-## 核心理念
+**装完即用，不绑定任何 LLM API key**——宿主 IDE 自己就是 LLM。
 
-> 不是记录"做了什么"，而是沉淀"学到了什么"。
+---
 
-灵感来源：[llm-wiki 方法论](https://github.com/sdyckjq-lab/llm-wiki-skill)（知识编译一次、持续维护，而非每次重新检索）。
+## 心智模型：三个通道
+
+```
+你的对话                                你的 memory 库 (~/.ai-memory/)
+──────────                              ─────────────────────────────
+                                                                       
+"记住这个 X"  ──── remember ─────────→  ⚡ 实时落盘到 personal/<id>.md  
+                                          下一秒任意 IDE 可召回         
+                                                                       
+日常聊天     ──── lazy distill ──────→  🤖 IDE 启动时后台静默蒸馏     
+(自动)                                    每次开新 chat 顺手消化 1 条   
+                                                                       
+历史对话     ──── ai-memory init ────→  📦 一次性回溯（首装时）       
+(7d/30d/all)                              生成任务包让 agent 慢慢消化   
+
+读取通道：
+  IDE 自动调 search_memory ←─────→ memory 库 ←─────→ 你随时
+  (写代码时遇到相关问题)                              ai-memory ls/show/edit
+  
+                              ↓
+                       AGENTS.md (兜底通道)
+                       不支持 MCP 的 agent 也能从这读到摘要
+```
+
+**关键性质**：
+- 三种写入通道**互不冲突**——你可以同时用：日常自动跑，重要的主动 `remember`，新装时 `init` 回溯
+- 写入永远落盘到 markdown，**人随时可改**（`source: manual/edited` 的不会被 AI 覆盖）
+- LLM 由你的 IDE 提供（默认 `host_agent` 模式）；想要后台 24/7 自动跑可选 `api` 模式
+
+---
 
 ## 5 分钟上手
 
@@ -18,84 +48,131 @@ cd ~/ai-coding-memory
 ./install.sh
 ```
 
-`install.sh` 会自动完成：
-1. 拉取 fork 的 `llm-wiki-skill` submodule
-2. 创建数据目录 `~/.ai-memory/{raw,wiki,config}`
-3. 安装 Python 依赖
-4. 把 MCP 配置注入 Cursor / Aone Copilot / Qoder
+`install.sh` 6 步交互安装：
+1. 创建 `~/.ai-memory/` 数据目录
+2. 检查 / 安装 Python 依赖（fastmcp + pyyaml）
+3. 注入 MCP 配置到已装 IDE（Cursor / Claude Code / Aone Copilot / Qoder）
+4. 安装统一 skill 包到 IDE skills 目录
+5. **询问 LLM mode**（默认 host_agent 零成本；有 API key 可选 api 模式自动后台跑）
+6. **询问是否现在 init**（推荐 last-7d；约 3 分钟，host_agent 模式只生成任务包不烧钱）
 
-之后：
-- 编辑 `~/.ai-memory/config/domain-mapping.yml` 配置你的领域映射
-- 在 QoderWork 中导入 `workflows/qoderwork-daily.yml` 设置每日 22:00 定时任务
-- 重启 IDE 让 MCP Server 生效
+装完会自动把"重启 IDE 后第一句话"复制到剪贴板，提示你 Cmd+V 即可。
 
-## 架构
+---
+
+## 装完后的 3 件事
+
+### 1. 验证装好了
+
+在任意 IDE 里说一句：
+
+> 我刚装了 ai-coding-memory，请验证一下能不能用
+
+skill 会跑 onboarding 流程：MCP 连通性 → 写一条测试 memory → 召回验证 → 给出推荐下一步。30 秒走完。
+
+### 2. 让 AI 记住一些事
 
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  collect 📥  │ →  │  distill 🧪  │ →  │  compile 📚  │ →  │  recall 🔌   │
-│  采集对话     │    │  预处理切分   │    │  llm-wiki    │    │  MCP 召回    │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
-       ↓                   ↓                    ↓                    ↑
-  raw/sessions/       raw/topics/             wiki/               IDE 上下文
+> 记住这个：winterfell 的 Redis 连接池 maxIdle 必须 ≥ 8，否则高峰会断连
 ```
 
-完整设计见 [`docs/design.md`](docs/design.md)。
+AI 调 MCP `remember` 工具，立即落盘到 `~/.ai-memory/personal/`。下次切到 Aone Copilot 问相关问题，自动召回。
 
-## 三层知识分层
+### 3. 让 AI 整理累积的对话
 
-| 层级 | 适用范围 | 例子 |
-|---|---|---|
-| **project** | 单一代码库 | winterfell 的 `OfferModel` 字段映射 |
-| **domain** | 跨项目同业务 | 导购搜索的排序公式 |
-| **general** | 完全通用 | Java Stream 性能陷阱 / Redis evalSha 用法 |
+```
+> 整理今日记忆（或：消化任务包 / 跑一遍 memory pipeline）
+```
 
-召回时根据当前 IDE workspace **自动过滤**，避免无关知识打扰。
+agent 走 skill 的批量消化流程：每批 5-10 个任务包，跑完问"继续吗"。
 
-## 模块说明
+---
 
-| 模块 | 状态 | 说明 |
-|---|---|---|
-| `collect/` | ✅ | 复用 `daily-coding-summary` 的提取逻辑 |
-| `distill/` | ✅ | 4 步流水线（切分 + 指代消解 + 代码筛选 + 分层标注），Agent 编排模式 |
-| `compile/` | ✅ | 包装 fork 的 llm-wiki-skill；route + ingest 双阶段 |
-| `mcp-server/` | ✅ | FastMCP 实现，scope 自动按 workspace 路由 |
-| `workflows/` | ✅ | `manual-trigger.sh` + `qoderwork-daily.yml` |
+## 一些特性
 
-> 2026-04-25 已端到端跑通：5 sessions → 5 topic → 4 子库（5 source + 11 entity） → 召回测试 9 查询命中 8（88%）。
-> 详细安装与定时任务部署见 [`docs/install-and-schedule.md`](docs/install-and-schedule.md)。
+| 特性 | 说明 |
+|---|---|
+| **跨 IDE 共享** | 一份数据，4 个 IDE 都能读写（Cursor / Claude Code / Aone / Qoder） |
+| **项目自动隔离** | 按 git remote URL 归一化作 key，不同 repo 不串味 |
+| **跨项目经验迁移** | 在新项目踩老坑，相关 memory 会被召回（tags 重合 + 标题相似度阈值） |
+| **人改优先** | `source: manual/edited` 的 memory 永远不会被自动 pipeline 覆盖 |
+| **冲突检测** | 同主题新旧 memory 自动标 `potential_conflicts`，召回时降权 |
+| **AGENTS.md 双写** | 项目摘要同步到 `<project>/AGENTS.md` 的 marker 块，不破坏用户已有内容；不支持 MCP 的 agent 也能读到 |
+| **零外部依赖** | `host_agent` 模式不需要任何 API key；纯 stdlib + fastmcp |
 
-## 设计原则（Harness Engineering）
+---
 
-1. **单一入口、清晰契约**：每个模块独立 `SKILL.md` + JSON/Markdown 数据契约
-2. **文件即接口**：模块间通过文件系统通信
-3. **可观测性**：所有脚本支持 `--verbose` / `--dry-run`
-4. **容错优雅降级**：LLM 失败 → 兜底直入；单 session 失败不阻塞
-5. **AI 友好**：动词化函数名、类型注解、配置外置、路径常量集中
-6. **团队推广**：`install.sh` 一键搞定
-
-详见 `docs/design.md` 第 12 节。
-
-## 数据目录结构
+## 数据布局
 
 ```
 ~/.ai-memory/
-├── raw/sessions/YYYY-MM-DD.json        # collect 输出
-├── raw/topics/YYYY-MM-DD/*.md          # distill 输出
-├── wiki/                                # compile 输出
-│   ├── projects/<project>/
-│   ├── domains/<domain>/
-│   └── general/<category>/
-├── config/domain-mapping.yml           # 用户配置
-└── logs/                                # 各 stage 日志
+├── personal/<id>.md            跨项目通用（人 + AI 共写）
+├── projects/<git-id>/<id>.md   项目专属
+├── archive/<id>.md             用户/系统软删（可 restore）
+├── .pending/<task_id>.task     host_agent 模式下挂起的任务包
+├── raw/sessions/<date>.json    原始会话（collect 阶段产出）
+├── logs/                       distill / filtered / recall 日志
+└── config/config.yml           用户配置
 ```
 
-## 隐私与安全
+每个 `.md` 是带 frontmatter 的纯 markdown，可以直接 `$EDITOR` 打开编辑——人改后 source 字段自动升级为 `edited`，从此不被 AI 覆盖。
 
-- 所有数据**仅存本地**（`~/.ai-memory/`）
-- 不上传任何对话到云端
-- LLM 调用复用当前 IDE 的能力（不需要额外 API key）
-- `domain-mapping.yml` 不入 git
+---
+
+## CLI 速查
+
+```bash
+ai-memory add [--scope personal|project] [--tags ...]   # 手动新增
+ai-memory edit <id-or-substring>                        # $EDITOR 编辑
+ai-memory ls [--scope ...] [--value high]               # 列出
+ai-memory show <id>                                     # 全文
+ai-memory archive <id>                                  # 软删
+ai-memory restore <id>                                  # 从 archive 恢复
+
+ai-memory distill [--range today]                       # 蒸馏当日
+ai-memory init [--range last-7d|last-30d|all] [--yes]   # 首次回溯
+ai-memory pending                                       # 看任务包状态
+ai-memory config show / get / set                       # LLM mode 等
+ai-memory stats                                         # 写入/召回/采纳统计
+ai-memory sync-agents-md                                # 同步项目摘要到 AGENTS.md
+```
+
+CLI 的入口实际是 `python3 cli/ai_memory.py`，你可以在 `~/.bashrc` 加 alias：
+```bash
+alias ai-memory="python3 ~/ai-coding-memory/cli/ai_memory.py"
+```
+
+---
+
+## 隐私
+
+- 所有 memory 数据**仅存本地** `~/.ai-memory/`
+- `host_agent` 模式：LLM 调用走宿主 IDE 自己的 LLM 通道（你怎么用 IDE 就怎么用，不额外向第三方上行）
+- `api` 模式：调用你配置的 OpenAI-compatible API（DashScope / OpenAI / 等），相关对话片段会发往该 API
+- `domain-mapping.yml` 这类用户私有配置不入 git
+
+---
+
+## 文档导航
+
+| 文件 | 何时读 |
+|---|---|
+| `README.md`（本文）| 第一次了解工具 |
+| `docs/redesign.md` | 完整设计文档（含所有 ADR） |
+| `docs/p6-reflect-design.md` | 未来路线：reflect / 合并机制 |
+| `skill/SKILL.md` | Agent 视角的 onboarding + 批量消化操作手册 |
+| `docs/design.legacy.md` | 已废弃的 v0.3 设计（仅历史归档） |
+
+---
+
+## 现状
+
+- ✅ P0–P5 已实施（commits `65f3359` ~ `1124d1b`）
+- ✅ 多轮 bug fix（frontmatter block scalar / read_page security / submit silent loss / 等）
+- ✅ 在用户真实数据 last-7d 上验证全链路（67 任务包 → 27 条 memory + 12 条丢弃）
+- 🔬 P6 (reflect) 已有设计草案，等 P5 跑 1-2 月数据再决定是否上
+
+---
 
 ## 许可
 
