@@ -83,39 +83,54 @@ mcp = FastMCP(
 
 # ==================== 内部工具 ====================
 
-def _count_total_memories() -> int:
-    """统计 personal + projects 下 .md 总数（不含 archive）"""
-    from core.paths import PERSONAL_DIR, PROJECTS_DIR
-    n = 0
-    if PERSONAL_DIR.exists():
-        n += sum(1 for _ in PERSONAL_DIR.glob("*.md"))
-    if PROJECTS_DIR.exists():
-        n += sum(1 for _ in PROJECTS_DIR.rglob("*.md"))
-    return n
+_NEAR_EMPTY_THRESHOLD = 5
+
+
+def _is_library_near_empty() -> bool | None:
+    """判断 memory 库是否近乎为空（< _NEAR_EMPTY_THRESHOLD 条）。
+
+    复用 ms._iter_all 与 stats / list_memories 口径一致（跳过缺 frontmatter 的损坏文件），
+    扫到阈值即停，避免大库下空召回时全量遍历。失败返回 None（调用方按"未知"处理）。
+    """
+    try:
+        seen = 0
+        for _ in ms._iter_all(include_archived=False):
+            seen += 1
+            if seen >= _NEAR_EMPTY_THRESHOLD:
+                return False
+        return True
+    except Exception:
+        return None
+
+
+def _render_empty_lib_hints(base_msg: str) -> str:
+    """空库 / 近空库时附 actionable 提示。多个工具（search / list_topics /
+    project_context）共享同一份引导文案，避免文案漂移。"""
+    near_empty = _is_library_near_empty()
+    if near_empty is not True:
+        return base_msg
+    hints = [
+        "",
+        "💡 你的知识库还很空。可以：",
+        "   • 跑 `ai-memory init --range last-7d` 回溯最近一周对话",
+        "   • 或在对话中说『记住这个 X』主动添加",
+    ]
+    try:
+        pending = task_pack.count_pending()
+    except Exception:
+        pending = 0
+    if pending > 0:
+        hints.append(
+            f"   • 你还有 **{pending}** 个待消化任务包，"
+            "说『整理今日记忆』让 agent 帮你跑"
+        )
+    return base_msg + "\n" + "\n".join(hints)
 
 
 def _safe_render_search_results(results: list[dict]) -> str:
     """把 search 结果渲染为 Markdown 文本（IDE 友好）"""
     if not results:
-        # 体验 #4：库为空 / 极少时给出可执行下一步，避免用户怀疑 MCP 没工作
-        try:
-            total = _count_total_memories()
-            pending = task_pack.count_pending()
-        except Exception:
-            total, pending = -1, -1
-        msg = "_未在你的个人知识库中找到相关条目_"
-        if total >= 0 and total < 5:
-            hints = [
-                "",
-                f"💡 你的知识库目前只有 **{total}** 条 memory。可以：",
-                "   • 跑 `ai-memory init --range last-7d` 回溯最近一周对话",
-                "   • 或在对话中说『记住这个 X』主动添加",
-            ]
-            if pending > 0:
-                hints.append(f"   • 你还有 **{pending}** 个待消化任务包，"
-                             "说『整理今日记忆』让 agent 帮你跑")
-            msg += "\n" + "\n".join(hints)
-        return msg
+        return _render_empty_lib_hints("_未在你的个人知识库中找到相关条目_")
     lines: list[str] = []
     for i, r in enumerate(results, 1):
         snippet = r.get("snippet", "")
@@ -282,11 +297,12 @@ def list_topics(scope: str = "auto", workspace: str = None) -> str:
     items = searcher.list_topic_files(scope_info["include_paths"])
 
     if not items:
-        return (
+        base = (
             f"_当前 scope (`{scope_info['mode']}`) 下尚无 topic 文件_\n\n"
             f"workspace: `{effective_ws or '(unknown)'}`, "
             f"paths: {len(scope_info['include_paths'])}"
         )
+        return _render_empty_lib_hints(base)
 
     grouped: dict[str, list[dict]] = {}
     for it in items:
@@ -297,7 +313,6 @@ def list_topics(scope: str = "auto", workspace: str = None) -> str:
         f"**scope**: `{scope_info['mode']}` "
         f"→ {len(grouped)} path(s), {len(items)} topic(s)",
     ]
-    # UX-6: 把 scope_info warnings 也展示，与 search_memory 一致
     if scope_info.get("warnings"):
         lines.append("⚠️ " + "; ".join(scope_info["warnings"]))
     lines.append("")
@@ -463,14 +478,14 @@ def project_context(workspace: str) -> str:
         return "❌ project_context 需要 workspace 参数"
     info = resolve_project_key(workspace)
     if not info:
-        # 即便不在 git 仓库，也尽量给宿主 Agent 一次自动消化机会
-        return (f"_workspace `{workspace}` 不在 git 仓库中，无 project 记忆_"
-                + _build_pending_distill_hint())
+        # 即便不在 git 仓库，也给宿主 Agent 一次自动消化机会 + 空库引导
+        base = f"_workspace `{workspace}` 不在 git 仓库中，无 project 记忆_"
+        return _render_empty_lib_hints(base) + _build_pending_distill_hint()
     project_key = info["key"]
     summary = agents_md_sync.build_summary(project_key)
     if not summary:
-        return (f"_project `{project_key}` 暂无 memory（用 remember 工具或 ai-memory distill 添加）_"
-                + _build_pending_distill_hint())
+        base = f"_project `{project_key}` 暂无 memory_"
+        return _render_empty_lib_hints(base) + _build_pending_distill_hint()
 
     # 同步到 AGENTS.md（zero-MCP 兜底，最佳努力 —— 失败不影响本调用返回）
     # 注意：只把 summary 同步到文件，pending 消化提示只塞进返回字符串、不污染 AGENTS.md
@@ -499,7 +514,7 @@ def forget(memory_id: str) -> str:
     返回：归档路径 + 恢复命令。
     安全：不删除文件，只移到 archive/，可通过 ai-memory restore 恢复。
     """
-    # UX-4: 先检查是否已经在 archive/，避免重复 forget 误报 ✓
+    # 已经在 archive/ 时返回 ℹ 而不是误报 ✓
     from core.paths import ARCHIVE_DIR
     already = ARCHIVE_DIR / f"{memory_id}.md"
     if already.exists():
@@ -569,19 +584,17 @@ def pending_distill_count() -> str:
 def get_next_distill_task(force: bool = False) -> str:
     """取下一个待蒸馏任务（原子操作，多 agent 并发安全），返回完整 prompt。
 
-    🚫 **不要无限循环消化**。三种场景对应不同节奏：
+    🚫 **不要无限循环消化**。两种场景对应不同节奏：
 
     场景 A（被 project_context 静默触发，启动时顺手 1 条）：
         只跑 1 条，提交后**停下**，回到用户主问题。绝不连续 take 第 2 条。
 
-    场景 B（用户显式喊「整理今日记忆」/「批量消化」）：
-        每次 take 5-10 条上限，跑完后**停下问用户**「继续吗？还剩 N 条」。
-        用户说继续才再 loop 5-10 条。**绝不一次 loop 到 pending=0**——
-        会爆 chat 上下文、烧光 IDE LLM 配额，subagent 实测 35/66 时被 quota 砍掉。
-
-    场景 C（用户喊「全部跑完」/「force」）：
-        传 force=True 突破当日上限；agent 仍按 5-10 一批节奏跑、每批问一次。
-        提醒用户："这会消耗较多 IDE 配额，建议分多次"。
+    场景 B（用户显式喊「整理今日记忆」/「批量消化」/「全部跑完」）：
+        每批 5-10 条，提交完**停下问用户**「继续吗？还剩 N 条」。
+        用户说继续才再 loop 一批；绝不一次 loop 到 pending=0（爆 chat 上下文 +
+        烧光 IDE LLM 配额）。
+        若用户喊「全部跑完」/「force」：传 `force=True` 突破当日上限，但仍按
+        每批 5-10 节奏跑、每批问一次，并提醒"这会消耗较多 IDE 配额"。
 
     参数：
         force : 突破当日消化上限。默认 False，超出 daily_cap 时拒绝并提示「明天继续」。
@@ -653,7 +666,6 @@ def submit_distill_result(task_id: str, result_yaml: str) -> str:
             distill_quota.incr_today()
         except Exception:
             pass
-    # UX-1: 状态符号反映实际结果
     if errors and not written and not dropped:
         marker = "❌ submit_distill_result"
     elif errors:

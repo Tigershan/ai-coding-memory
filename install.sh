@@ -114,30 +114,21 @@ fi
 # ---- Step 3: 注入 MCP 配置 ----
 info "🔌 Step 3/6: Configuring MCP servers..."
 if [ -f "${PROJECT_ROOT}/scripts/inject_mcp_config.py" ]; then
-    # 注入目标的"父目录探测"逻辑：
-    #   - 独立 mcp.json 文件 → 父目录存在即视为 IDE 已装
-    #   - Claude Code 的 ~/.claude.json → 文件本身存在即视为已装（user profile）
-    declare -a IDE_TARGETS=(
-        "${HOME}/.cursor/mcp.json"
-        "${HOME}/.aone_copilot/mcp.json"
-        "${HOME}/Library/Application Support/Qoder/User/mcp.json"
-        "${HOME}/.claude.json"   # Claude Code: mcpServers 嵌套在 user profile 里
+    # 每条三元组: "label|target|kind"
+    #   kind=dir  : 父目录存在即视 IDE 已装（独立 mcp.json）
+    #   kind=file : 文件本身存在即视已装（Claude Code 这种 user profile）
+    IDE_ENTRIES=(
+        "Cursor|${HOME}/.cursor/mcp.json|dir"
+        "Aone Copilot|${HOME}/.aone_copilot/mcp.json|dir"
+        "Qoder|${HOME}/Library/Application Support/Qoder/User/mcp.json|dir"
+        "Claude Code|${HOME}/.claude.json|file"
     )
-    declare -a IDE_LABELS=(
-        "Cursor"
-        "Aone Copilot"
-        "Qoder"
-        "Claude Code"
-    )
-    for i in "${!IDE_TARGETS[@]}"; do
-        target="${IDE_TARGETS[$i]}"
-        label="${IDE_LABELS[$i]}"
-        # ~/.claude.json 是文件本身；其他三个是父目录里的 mcp.json
-        if [ "$target" = "${HOME}/.claude.json" ]; then
-            [ -f "$target" ] || { info "  · ${label} 未安装，跳过"; continue; }
-        else
-            [ -d "$(dirname "$target")" ] || { info "  · ${label} 未安装，跳过"; continue; }
-        fi
+    for entry in "${IDE_ENTRIES[@]}"; do
+        IFS='|' read -r label target kind <<< "$entry"
+        case "$kind" in
+            file) [ -f "$target" ] || { info "  · ${label} 未安装，跳过"; continue; } ;;
+            dir)  [ -d "$(dirname "$target")" ] || { info "  · ${label} 未安装，跳过"; continue; } ;;
+        esac
         if python3 "${PROJECT_ROOT}/scripts/inject_mcp_config.py" \
             --target "$target" \
             --project-root "$PROJECT_ROOT" >/dev/null 2>&1; then
@@ -314,7 +305,12 @@ info "✅ Installation complete!"
 echo ""
 
 # ---- 准备 handover：根据当前状态生成"启动咒语"，自动复制到剪贴板 ----
-PENDING_COUNT=$(ls "${DATA_ROOT}/.pending"/*.task 2>/dev/null | wc -l | tr -d ' ')
+# 数 pending 任务包（用 glob 数组而非 ls/wc，避免路径含空格/glob 不展开问题）
+shopt -s nullglob
+_pending_files=("${DATA_ROOT}/.pending"/*.task)
+PENDING_COUNT=${#_pending_files[@]}
+shopt -u nullglob
+unset _pending_files
 
 # 三种场景的不同启动咒语
 if [ "${PENDING_COUNT:-0}" -gt 0 ]; then

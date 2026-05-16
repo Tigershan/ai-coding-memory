@@ -35,9 +35,7 @@ KNOWN_IDE_CONFIGS = {
     "cursor": "~/.cursor/mcp.json",
     "aone-copilot": "~/.aone_copilot/mcp.json",
     "qoder": "~/Library/Application Support/Qoder/User/mcp.json",
-    # Claude Code 把 mcpServers 放在 user profile 里。_merge_server 已能识别"已有
-    # mcpServers"分支，会只动该字段不破坏其他设置（theme / numStartups / 等）。
-    "claude-code": "~/.claude.json",
+    "claude-code": "~/.claude.json",  # user profile, mcpServers nested
 }
 
 

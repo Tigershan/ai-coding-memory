@@ -323,7 +323,6 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(f"   ⚠️ 含 potential_conflicts: {with_conflicts}  "
               f"被标 superseded: {with_superseded}")
     print()
-    # 体验 #6：pending 堆积告警
     pending_marker = "📥"
     pending_extra = ""
     if pending >= 100:
