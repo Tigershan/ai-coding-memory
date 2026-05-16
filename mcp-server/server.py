@@ -51,7 +51,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core import agents_md_sync, memory_store as ms, task_pack  # noqa: E402
+from core import agents_md_sync, memory_store as ms, recall_log, task_pack  # noqa: E402
 from core.memory_store import Memory  # noqa: E402
 from core.project_key import resolve_project_key  # noqa: E402
 
@@ -153,6 +153,11 @@ def search_memory(query: str, scope: str = "auto", workspace: str = None) -> str
         snippet_context_lines=_CFG.snippet_context_lines,
         max_results_before_rerank=_CFG.max_results_before_rerank,
     )
+    # 召回反馈日志（不阻塞失败）
+    try:
+        recall_log.log_search(query, [r.get("id", "") for r in results if r.get("id")])
+    except Exception:
+        pass
 
     project_key = scope_info.get("project_key")
     header_lines = [
@@ -196,6 +201,16 @@ def read_page(path: str) -> str:
         data = p.read_bytes()
     except OSError as e:
         return f"❌ 读取失败：{e}"
+
+    # 召回反馈日志（read 表示用户/agent 真的读了某条 → 是更强的"采纳"信号）
+    try:
+        # 从 frontmatter 提 id（避免依赖路径）
+        from core.frontmatter import parse as parse_fm
+        fm_dict, _ = parse_fm(data.decode("utf-8", errors="replace"))
+        if fm_dict.get("id"):
+            recall_log.log_read(fm_dict["id"], str(p))
+    except Exception:
+        pass
 
     if len(data) > MAX_PAGE_BYTES:
         text = data[:MAX_PAGE_BYTES].decode("utf-8", errors="replace")

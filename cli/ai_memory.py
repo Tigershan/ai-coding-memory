@@ -271,6 +271,93 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_stats(args: argparse.Namespace) -> int:
+    """P5 - 写入 / 召回 / 采纳统计"""
+    from core import memory_store as ms
+    from core import recall_log
+    from core import task_pack
+    from core.paths import COLD_DIR, ARCHIVE_DIR, LOG_DIR
+
+    # 1. memory 总量
+    all_mems = ms.list_memories(include_archived=False)
+    by_scope: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    by_value: dict[str, int] = {}
+    with_conflicts = 0
+    with_superseded = 0
+    for m in all_mems:
+        by_scope[m.scope] = by_scope.get(m.scope, 0) + 1
+        by_source[m.source] = by_source.get(m.source, 0) + 1
+        by_value[m.value] = by_value.get(m.value, 0) + 1
+        if m.potential_conflicts:
+            with_conflicts += 1
+        if m.potentially_superseded_by:
+            with_superseded += 1
+
+    # 2. 冷存储 + 归档
+    cold_count = len(list(COLD_DIR.glob("*.md"))) if COLD_DIR.exists() else 0
+    archive_count = len(list(ARCHIVE_DIR.glob("*.md"))) if ARCHIVE_DIR.exists() else 0
+
+    # 3. 任务包
+    pending = task_pack.count_pending()
+
+    # 4. 召回反馈
+    stats = recall_log.collect_stats(since_days=args.since_days)
+
+    # 5. 过滤日志摘要（仅过去 7 天）
+    filter_count = 0
+    if LOG_DIR.exists():
+        for f in LOG_DIR.glob("filtered-*.jsonl"):
+            try:
+                filter_count += sum(1 for _ in open(f, encoding="utf-8"))
+            except OSError:
+                pass
+
+    print(f"📊 ai-memory stats (recall window = past {args.since_days} days)")
+    print()
+    print(f"📚 Memory 总览（不含 archived / cold）")
+    print(f"   总数：{len(all_mems)}")
+    print(f"   by scope:   {dict(sorted(by_scope.items()))}")
+    print(f"   by source:  {dict(sorted(by_source.items()))}")
+    print(f"   by value:   {dict(sorted(by_value.items()))}")
+    if with_conflicts or with_superseded:
+        print(f"   ⚠️ 含 potential_conflicts: {with_conflicts}  "
+              f"被标 superseded: {with_superseded}")
+    print()
+    print(f"🧊 冷存储: {cold_count}    📦 archive: {archive_count}    "
+          f"📥 pending tasks: {pending}    🚫 过滤累计: {filter_count}")
+    print()
+    print(f"🔍 召回（过去 {stats['since_days']} 天）")
+    print(f"   search 调用: {stats['n_search']}")
+    print(f"   read_page (强采纳信号): {stats['n_read']}")
+    print(f"   read/search 比: {stats['adoption_rate']:.1%}")
+    if stats["top_hit_ids"]:
+        print()
+        print(f"   🔥 最常召回的 memory:")
+        for mid, cnt in stats["top_hit_ids"][:5]:
+            print(f"     {cnt}× {mid}")
+    return 0
+
+
+def cmd_decay(args: argparse.Namespace) -> int:
+    """P5 - 90 天未召中且 source=auto 的自动归档"""
+    from core import recall_log
+    result = recall_log.auto_decay(days=args.days, dry_run=args.dry_run)
+    cands = result["candidates"]
+    archived = result["archived"]
+    if args.dry_run:
+        print(f"🔬 dry-run: 找到 {len(cands)} 个候选（90 天未召中 + source=auto/bootstrap）")
+        for mid in cands[:20]:
+            print(f"  - {mid}")
+        if len(cands) > 20:
+            print(f"  ... 还有 {len(cands) - 20} 个")
+        return 0
+    print(f"✓ 已归档 {len(archived)} 条（候选 {len(cands)}）")
+    for mid in archived[:10]:
+        print(f"  - {mid}")
+    return 0
+
+
 def cmd_sync_agents_md(args: argparse.Namespace) -> int:
     """P4 - 把 project 摘要同步到 AGENTS.md"""
     from core import agents_md_sync
@@ -401,10 +488,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--dry-run", action="store_true", help="只打印不写入")
     p_sync.set_defaults(func=cmd_sync_agents_md)
 
-    # 占位命令（P5）
+    # stats - P5 已落地
+    p_st = sub.add_parser("stats", help="写入/召回/采纳统计")
+    p_st.add_argument("--since-days", type=int, default=30,
+                      help="召回反馈窗口（默认 30 天）")
+    p_st.set_defaults(func=cmd_stats)
+
+    # decay - P5 已落地（非顶层命名，相对独立功能）
+    p_dec = sub.add_parser("decay", help="90 天未召中的 auto memory 自动归档")
+    p_dec.add_argument("--days", type=int, default=90)
+    p_dec.add_argument("--dry-run", action="store_true")
+    p_dec.set_defaults(func=cmd_decay)
+
+    # 占位命令（远期）
     for name, helptext in [
-        ("stats", "[P5] 召回反馈 / 写入 / 采纳统计"),
-        ("rebuild-index", "[P5] 升级到 SQLite FTS5 索引"),
+        ("rebuild-index", "[远期] 升级到 SQLite FTS5 索引"),
     ]:
         ph = sub.add_parser(name, help=helptext)
         ph.add_argument("rest", nargs=argparse.REMAINDER)

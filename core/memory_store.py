@@ -179,7 +179,68 @@ def _extract_title_from_body(body: str) -> str:
 
 # ==================== 写 ====================
 
-def save(memory: Memory, *, allow_overwrite_protected: bool = False) -> Path:
+CONFLICT_TAG_OVERLAP_THRESHOLD = 2          # 触发冲突候选的 tag 重合度
+CONFLICT_TITLE_SIM_THRESHOLD = 0.40         # 标题 token Jaccard 阈值（OR 关系）
+
+
+def find_conflict_candidates(memory: Memory) -> list[str]:
+    """轻量冲突检测（按 ADR-12，不调 LLM）：
+    返回与 memory 候选冲突的现有 memory id 列表。
+
+    规则：同 scope + 同 project，且满足任一信号：
+        - tags 重合 ≥ CONFLICT_TAG_OVERLAP_THRESHOLD，或
+        - 标题 token Jaccard > CONFLICT_TITLE_SIM_THRESHOLD
+    （中文标题做 token 化后 jaccard 偏低，所以用 OR 不用 AND）
+    """
+    import re as _re
+    candidates: list[str] = []
+    a_tags = set(t.lower() for t in (memory.tags or []) if isinstance(t, str))
+    a_title_tokens = set(_re.findall(r"\w+", (memory.title or "").lower()))
+    for existing in _iter_all(include_archived=False):
+        if existing.id == memory.id:
+            continue
+        if existing.scope != memory.scope:
+            continue
+        if memory.scope == "project" and existing.project_key != memory.project_key:
+            continue
+        # tag 重合
+        b_tags = set(t.lower() for t in (existing.tags or []) if isinstance(t, str))
+        tag_overlap = len(a_tags & b_tags) if (a_tags and b_tags) else 0
+        # title 相似
+        b_title_tokens = set(_re.findall(r"\w+", (existing.title or "").lower()))
+        title_sim = 0.0
+        if a_title_tokens and b_title_tokens:
+            title_sim = len(a_title_tokens & b_title_tokens) / len(a_title_tokens | b_title_tokens)
+        if tag_overlap >= CONFLICT_TAG_OVERLAP_THRESHOLD or title_sim >= CONFLICT_TITLE_SIM_THRESHOLD:
+            candidates.append(existing.id)
+    return candidates
+
+
+def _mark_superseded(old_id: str, new_id: str) -> None:
+    """把 old_id 标记 potentially_superseded_by += [new_id]"""
+    old_path = _find_by_id(old_id)
+    if old_path is None:
+        return
+    old_mem = load(old_path)
+    if old_mem is None:
+        return
+    if old_mem.source in PROTECTED_SOURCES:
+        # 即便是 manual/edited 也加标记（不算覆盖 body）
+        pass
+    existing = list(old_mem.potentially_superseded_by or [])
+    if new_id in existing:
+        return
+    existing.append(new_id)
+    old_mem.potentially_superseded_by = existing
+    # 重写文件（allow_overwrite_protected 用于跳过 source 保护）
+    try:
+        save(old_mem, allow_overwrite_protected=True, _skip_conflict_check=True)
+    except Exception:
+        pass
+
+
+def save(memory: Memory, *, allow_overwrite_protected: bool = False,
+         _skip_conflict_check: bool = False) -> Path:
     """写一条 memory 到磁盘。
     - source=manual/edited 且文件已存在：默认拒绝（除非 allow_overwrite_protected=True，给 CLI edit 用）
     - 自动设置 _mtime_at_write 字段
@@ -218,6 +279,21 @@ def save(memory: Memory, *, allow_overwrite_protected: bool = False) -> Path:
     # 写完后立刻 stat 取 mtime 并改字段（再写一次回去——确保 _mtime_at_write 与文件 mtime 对齐）
     actual_mtime = target.stat().st_mtime
     fm_dict["_mtime_at_write"] = actual_mtime
+
+    # 冲突检测（ADR-12）：仅对新写入做（_skip_conflict_check 防止递归）
+    if not _skip_conflict_check:
+        try:
+            candidates = find_conflict_candidates(memory)
+            if candidates:
+                fm_dict["potential_conflicts"] = candidates
+                memory.potential_conflicts = candidates
+                # 反向标记：被冲突的旧 memory 加 potentially_superseded_by
+                for old_id in candidates:
+                    _mark_superseded(old_id, memory.id)
+        except Exception:
+            # 冲突检测失败不阻塞写入
+            pass
+
     text = fm.dump(fm_dict, memory.body)
     _atomic_write(target, text)
     memory._mtime_at_write = actual_mtime
