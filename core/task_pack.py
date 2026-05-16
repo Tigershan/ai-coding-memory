@@ -23,7 +23,10 @@
     write_task(prompt, session, project_key) -> task_id
     list_pending() -> list[dict]   每项含 {task_id, age_seconds, ide, workspace}
     take_next() -> dict | None     原子拿一个 → 改名 in_progress
-    submit_result(task_id, result_yaml) -> {kept, cold, error}
+    submit_result(task_id, result_yaml) -> {written, dropped, errors}
+        written: 落盘的 memory 路径列表
+        dropped: should_keep=false 直接丢弃的 topic 元信息（仅审计用，不入库）
+        errors:  解析/写入失败的描述
     mark_failed(task_id, error) -> None
     cleanup_old(max_age_days=7) -> int   过期清理
 """
@@ -47,8 +50,15 @@ SUFFIX_FAILED = ".task.failed"
 
 # ==================== 写 ====================
 
-def write_task(prompt: str, session: dict, project_key: str | None) -> str:
-    """把一个待蒸馏任务写入 .pending/，返回 task_id"""
+def write_task(prompt: str, session: dict, project_key: str | None,
+               *, batch_date: str | None = None) -> str:
+    """把一个待蒸馏任务写入 .pending/，返回 task_id
+
+    batch_date: 任务对应的会话日期 YYYY-MM-DD（init/lazy_trigger 应当传入）。
+        消化时按 batch_date 升序排队，让多天历史能均摊到多天里慢慢消化，
+        避免 60 条历史在同一天涌入宿主 IDE 的实时 LLM 配额。
+        没传时记空字符串，排序时视作"最旧"（与"未知"等价，先消化掉避免堆积过久）。
+    """
     ensure_data_dirs()
     task_id = uuid.uuid4().hex[:12]
     payload = {
@@ -58,6 +68,7 @@ def write_task(prompt: str, session: dict, project_key: str | None) -> str:
         "workspace": session.get("workspace", ""),
         "project_key": project_key or "null",
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "batch_date": batch_date or "",
         "prompt": prompt,
     }
     target = PENDING_DIR / f"{task_id}{SUFFIX_PENDING}"
@@ -103,11 +114,14 @@ def list_pending(include_in_progress: bool = True,
             "workspace": data.get("workspace", ""),
             "project_key": data.get("project_key", ""),
             "created_at": data.get("created_at", ""),
+            "batch_date": data.get("batch_date", ""),
             "age_seconds": int(now - f.stat().st_mtime),
             "status": st,
             "_path": str(f),
         })
-    out.sort(key=lambda x: x["created_at"])
+    # 涓流策略：按 batch_date 升序（最老的会话先消化）+ created_at 升序（同日 FIFO）
+    # 没有 batch_date 的旧任务排在最前（视作"未知/最老"，先清理掉避免堆积过久）
+    out.sort(key=lambda x: (x["batch_date"] or "0000-00-00", x["created_at"]))
     return out
 
 
@@ -126,14 +140,26 @@ def count_pending() -> int:
 
 def take_next() -> dict | None:
     """原子取一个 pending 任务 → 改名 in_progress，返回 task 数据。
-    多 agent 并发安全：os.rename 是原子的；改名失败说明被别的 agent 抢走"""
+    多 agent 并发安全：os.rename 是原子的；改名失败说明被别的 agent 抢走
+
+    排队策略（涓流）：(batch_date 升序, mtime 升序)
+    最老会话日期的任务先出队，让历史 init 的 N 天数据能按天均摊。
+    """
     if not PENDING_DIR.exists():
         return None
-    # 按 mtime 升序找一个 pending 任务
+
+    def _read_batch_date(p: Path) -> str:
+        """读取任务包的 batch_date 字段；解析失败 / 缺字段一律视作 '0000-00-00'（最旧）"""
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data.get("batch_date") or "0000-00-00"
+        except (json.JSONDecodeError, OSError):
+            return "0000-00-00"
+
     candidates = sorted(
         (f for f in PENDING_DIR.iterdir()
          if f.is_file() and f.name.endswith(SUFFIX_PENDING)),
-        key=lambda p: p.stat().st_mtime,
+        key=lambda p: (_read_batch_date(p), p.stat().st_mtime),
     )
     for src in candidates:
         dst = src.with_suffix(src.suffix + ".in_progress")
@@ -162,18 +188,21 @@ def take_next() -> dict | None:
 
 def submit_result(task_id: str, result_yaml: str) -> dict:
     """提交某个 in_progress 任务的结果。
-    返回 {written: [paths], cold: [paths], errors: [str]}"""
+    返回 {written: [paths], dropped: [{title, reason}], errors: [str]}
+
+    should_keep=false 的 topic **直接丢弃**（不再写 .cold/），
+    只在 dropped 字段里留 title+keep_reason 便于审计/统计。"""
     in_progress = PENDING_DIR / f"{task_id}{SUFFIX_IN_PROGRESS}"
     pending = PENDING_DIR / f"{task_id}{SUFFIX_PENDING}"
     src = in_progress if in_progress.exists() else (pending if pending.exists() else None)
     if src is None:
-        return {"written": [], "cold": [], "errors": [f"task_id 未找到：{task_id}"]}
+        return {"written": [], "dropped": [], "errors": [f"task_id 未找到：{task_id}"]}
 
     # 读 task 元信息
     try:
         meta = json.loads(src.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        return {"written": [], "cold": [], "errors": [f"读 task 失败：{e}"]}
+        return {"written": [], "dropped": [], "errors": [f"读 task 失败：{e}"]}
 
     # 解析 LLM 输出
     from .frontmatter import _parse_yaml
@@ -190,7 +219,7 @@ def submit_result(task_id: str, result_yaml: str) -> dict:
         parsed = _parse_yaml(s)
     except Exception as e:
         # 不删 task；让 agent 看到错误重试
-        return {"written": [], "cold": [], "errors": [f"YAML 解析失败：{e}"]}
+        return {"written": [], "dropped": [], "errors": [f"YAML 解析失败：{e}"]}
 
     # 严格检查：必须含 topics key（即使是空 list）。
     # 缺失说明 LLM 输出不合规或解析器没找到该字段（如 ``` 围栏外有杂文本），
@@ -205,7 +234,7 @@ def submit_result(task_id: str, result_yaml: str) -> dict:
             except OSError:
                 pass
         return {
-            "written": [], "cold": [],
+            "written": [], "dropped": [],
             "errors": [
                 "topics 字段缺失：LLM 输出可能未按要求格式。任务包标记为 failed。",
                 f"输出前 300 字预览：{snippet}",
@@ -221,14 +250,14 @@ def submit_result(task_id: str, result_yaml: str) -> dict:
             except OSError:
                 pass
         return {
-            "written": [], "cold": [],
+            "written": [], "dropped": [],
             "errors": [f"topics 不是 list（实际类型: {type(topics).__name__}）"],
         }
 
     # 落盘
     from . import memory_store as ms
     written: list[str] = []
-    cold: list[str] = []
+    dropped: list[dict] = []   # should_keep=false 的 topic，不入库，仅记录元信息
     errors: list[str] = []
 
     project_key = meta.get("project_key")
@@ -243,21 +272,24 @@ def submit_result(task_id: str, result_yaml: str) -> dict:
 
     for t in topics:
         try:
-            mem = _topic_to_memory(t, fake_session, project_key)
             if t.get("should_keep") is False:
-                p = ms.save_to_cold(mem)
-                cold.append(str(p))
-            else:
-                p = ms.save(mem)
-                written.append(str(p))
+                # LLM 自判低价值 → 直接丢弃。记一行 keep_reason 用于审计
+                dropped.append({
+                    "title": (t.get("title") or "")[:80],
+                    "reason": (t.get("keep_reason") or "")[:120],
+                })
+                continue
+            mem = _topic_to_memory(t, fake_session, project_key)
+            p = ms.save(mem)
+            written.append(str(p))
         except PermissionError as pe:
             errors.append(f"protected: {pe}")
         except Exception as e:
             errors.append(f"save failed: {e}")
 
     # 删除任务包仅当：parsed 含 topics key 且至少有一条成功落盘
-    # 或：topics: [] 明确表示 LLM 判该 session 无价值（合法选择，不算失败）
-    something_done = bool(written) or bool(cold)
+    # 或：topics: [] 或全部 should_keep=false（LLM 明确判定无价值，合法选择，不算失败）
+    something_done = bool(written) or bool(dropped)
     intentional_empty = len(topics) == 0
     if something_done or intentional_empty:
         try:
@@ -272,7 +304,7 @@ def submit_result(task_id: str, result_yaml: str) -> dict:
             except OSError:
                 pass
 
-    return {"written": written, "cold": cold, "errors": errors}
+    return {"written": written, "dropped": dropped, "errors": errors}
 
 
 def _topic_to_memory(topic: dict, session: dict, project_key: str | None):

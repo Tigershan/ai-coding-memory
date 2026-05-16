@@ -3,10 +3,13 @@
 按 redesign.md §5 数据模型 + §6.1 source 字段 + ADR-6 人改优先：
 
 memory 文件结构：
-    ~/.ai-memory/personal/<id>.md         scope=personal
+    ~/.ai-memory/personal/<id>.md             scope=personal
     ~/.ai-memory/projects/<dir_name>/<id>.md   scope=project
-    ~/.ai-memory/.cold/<id>.md            LLM 判 should_keep=false 的
-    ~/.ai-memory/archive/<id>.md          软删除
+    ~/.ai-memory/archive/<id>.md              软删除（用户手动 archive 或未来 reflect 归档）
+
+注意：LLM 判 should_keep=false 的 topic 由 distill / submit_distill_result
+**直接丢弃**（不再写 .cold/）。被丢弃的 topic 会在 logs/distill-*.log 留下一行
+"DROPPED: <session_id> reason=should_keep_false"，便于审计但不占索引。
 
 frontmatter source 字段语义：
     auto        : distill 生成；可被新 distill 覆盖（基于 mtime）
@@ -34,7 +37,6 @@ from typing import Iterable
 from . import frontmatter as fm
 from .paths import (
     ARCHIVE_DIR,
-    COLD_DIR,
     PERSONAL_DIR,
     PROJECTS_DIR,
     ensure_data_dirs,
@@ -86,10 +88,6 @@ def memory_path(memory: Memory) -> Path:
         from .project_key import _to_dir_name
         return PROJECTS_DIR / _to_dir_name(memory.project_key) / f"{memory.id}.md"
     raise ValueError(f"未知 scope: {memory.scope!r}")
-
-
-def cold_path(memory_id: str) -> Path:
-    return COLD_DIR / f"{memory_id}.md"
 
 
 def archive_path(memory_id: str) -> Path:
@@ -301,19 +299,6 @@ def save(memory: Memory, *, allow_overwrite_protected: bool = False,
     return target
 
 
-def save_to_cold(memory: Memory) -> Path:
-    """写到冷存储（LLM 判低价值，不进召回）"""
-    ensure_data_dirs()
-    target = cold_path(memory.id)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fm_dict = _to_frontmatter_dict(memory)
-    fm_dict["scope"] = "cold"  # 冷存储独立标记
-    text = fm.dump(fm_dict, memory.body)
-    _atomic_write(target, text)
-    memory.file_path = target
-    return target
-
-
 def archive(memory_id: str) -> Path | None:
     """软删除：把 memory 移到 archive/。返回新路径（找不到原件返回 None）"""
     src = _find_by_id(memory_id)
@@ -327,23 +312,17 @@ def archive(memory_id: str) -> Path | None:
 
 
 def restore(memory_id: str) -> Path | None:
-    """从 archive/ 或 .cold/ 恢复到原 scope。"""
-    for src_dir in (ARCHIVE_DIR, COLD_DIR):
-        src = src_dir / f"{memory_id}.md"
-        if not src.exists():
-            continue
-        # 读出来看 scope/project_key 决定回到哪
-        mem = load(src)
-        if not mem:
-            return None
-        # cold 标记的 scope 可能是 "cold"，需要看 extra 里有没有原始 scope
-        if mem.scope == "cold":
-            mem.scope = mem.extra.get("_orig_scope", "personal")
-        target = memory_path(mem)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(target))
-        return target
-    return None
+    """从 archive/ 恢复到原 scope。"""
+    src = ARCHIVE_DIR / f"{memory_id}.md"
+    if not src.exists():
+        return None
+    mem = load(src)
+    if not mem:
+        return None
+    target = memory_path(mem)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(target))
+    return target
 
 
 # ==================== 查 ====================
@@ -384,7 +363,7 @@ def find_by_id(memory_id: str) -> Memory | None:
 def _iter_all(include_archived: bool) -> Iterable[Memory]:
     roots = [PERSONAL_DIR, PROJECTS_DIR]
     if include_archived:
-        roots.extend([ARCHIVE_DIR, COLD_DIR])
+        roots.append(ARCHIVE_DIR)
     for root in roots:
         if not root.exists():
             continue
@@ -395,7 +374,7 @@ def _iter_all(include_archived: bool) -> Iterable[Memory]:
 
 
 def _find_by_id(memory_id: str) -> Path | None:
-    for root in (PERSONAL_DIR, PROJECTS_DIR, ARCHIVE_DIR, COLD_DIR):
+    for root in (PERSONAL_DIR, PROJECTS_DIR, ARCHIVE_DIR):
         if not root.exists():
             continue
         # 直接拼路径快路径（personal）

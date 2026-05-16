@@ -38,7 +38,6 @@ echo ""
 info "📁 Step 1/6: Creating data directories at ${DATA_ROOT}..."
 mkdir -p "${DATA_ROOT}/personal"
 mkdir -p "${DATA_ROOT}/projects"
-mkdir -p "${DATA_ROOT}/.cold"
 mkdir -p "${DATA_ROOT}/.pending"
 mkdir -p "${DATA_ROOT}/archive"
 mkdir -p "${DATA_ROOT}/raw/sessions"
@@ -270,9 +269,9 @@ if [ "${INSTALL_NONINTERACTIVE:-0}" = "1" ]; then
     INIT_CHOICE=4
     info "    NONINTERACTIVE: 跳过 init"
 else
-    printf "    选择 [4]: "
+    printf "    选择 [1]: "
     read -r INIT_CHOICE
-    INIT_CHOICE="${INIT_CHOICE:-4}"
+    INIT_CHOICE="${INIT_CHOICE:-1}"
 fi
 
 case "$INIT_CHOICE" in

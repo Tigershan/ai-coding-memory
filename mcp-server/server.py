@@ -52,6 +52,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core import agents_md_sync, memory_store as ms, recall_log, task_pack  # noqa: E402
+from core import config as user_config  # noqa: E402
+from core import distill_quota  # noqa: E402
 from core.memory_store import Memory  # noqa: E402
 from core.project_key import resolve_project_key  # noqa: E402
 
@@ -103,7 +105,7 @@ def _safe_render_search_results(results: list[dict]) -> str:
 def _is_path_inside_memory_root(p: Path) -> bool:
     """安全检查：防止 read_page 读到 ~/.ai-memory/ 之外的文件。
 
-    覆盖新数据布局（personal/ projects/ archive/ .cold/）和旧 wiki/。
+    覆盖新数据布局（personal/ projects/ archive/）和旧 wiki/。
     """
     try:
         resolved = p.resolve()
@@ -188,7 +190,7 @@ def read_page(path: str) -> str:
 
     参数：
         path : 知识库内的绝对路径，必须位于 ~/.ai-memory/ 子树内
-               （covers personal/ projects/ archive/ .cold/ wiki/）
+               （covers personal/ projects/ archive/ wiki/）
 
     返回：文件原始 Markdown 内容（超出 60KB 时截断并提示）。
     """
@@ -372,6 +374,44 @@ def remember(text: str, scope: str = "auto", tags: list[str] = None,
     )
 
 
+def _build_pending_distill_hint() -> str:
+    """host_agent 模式 + .pending 非空 + 当日额度未用尽时，给宿主 Agent 静默消化指令。
+
+    返回空字符串表示不追加（非 host_agent / 没有 pending / 当日额度用尽 / 出错）。
+    注意：本提示只追加到 project_context 的返回字符串，不写进 AGENTS.md。
+    """
+    try:
+        mode = user_config.get_value("llm.mode") or "host_agent"
+        if mode != "host_agent":
+            return ""
+        pending = task_pack.list_pending(include_in_progress=False)
+        n = len(pending)
+        if n == 0:
+            return ""
+        allowed, used, cap = distill_quota.can_take()
+        if not allowed:
+            # 当日额度已用尽：不再唆使 Agent 跑，但留一行明示用户"明天继续"
+            return (
+                "\n\n---\n\n"
+                f"📥 _后台 memory 消化：今日额度已用尽（{used}/{cap}），剩 {n} 条任务包将顺延到明天。_\n"
+                f"_想突破今日上限请喊『继续整理』走批量消化流程。_"
+            )
+    except Exception:
+        return ""
+
+    return (
+        "\n\n---\n\n"
+        f"📥 **后台 memory 消化（host_agent · 剩 {n} 条待整理 · 今日已消化 {used}/{cap}）**\n\n"
+        "在回答用户主问题**之前**，请按如下顺序静默跑 1 条任务包（仅 1 条，避免抢上下文）：\n"
+        "1. 调 `get_next_distill_task()` 拿到 `task_id` + `prompt`\n"
+        "2. 用你（宿主 Agent）自己的 LLM 跑这个 prompt，得到 YAML 输出\n"
+        "3. 调 `submit_distill_result(task_id, result_yaml)` 提交\n"
+        f"4. 在你给用户的最终回答**最前面**加一行：`_💾 已消化 1 条 memory（今日 {used + 1}/{cap}）_`\n\n"
+        "_失败可静默忽略（写日志即可，不打扰用户）。"
+        "用户如果显式说「整理今日记忆」请走 ai-coding-memory skill 的批量消化流程，不要走本提示。_"
+    )
+
+
 @mcp.tool()
 def project_context(workspace: str) -> str:
     """返回当前 project 的浓缩记忆摘要（用于 IDE 在 chat 启动时注入到 system prompt）。
@@ -394,13 +434,17 @@ def project_context(workspace: str) -> str:
         return "❌ project_context 需要 workspace 参数"
     info = resolve_project_key(workspace)
     if not info:
-        return f"_workspace `{workspace}` 不在 git 仓库中，无 project 记忆_"
+        # 即便不在 git 仓库，也尽量给宿主 Agent 一次自动消化机会
+        return (f"_workspace `{workspace}` 不在 git 仓库中，无 project 记忆_"
+                + _build_pending_distill_hint())
     project_key = info["key"]
     summary = agents_md_sync.build_summary(project_key)
     if not summary:
-        return f"_project `{project_key}` 暂无 memory（用 remember 工具或 ai-memory distill 添加）_"
+        return (f"_project `{project_key}` 暂无 memory（用 remember 工具或 ai-memory distill 添加）_"
+                + _build_pending_distill_hint())
 
     # 同步到 AGENTS.md（zero-MCP 兜底，最佳努力 —— 失败不影响本调用返回）
+    # 注意：只把 summary 同步到文件，pending 消化提示只塞进返回字符串、不污染 AGENTS.md
     try:
         written = agents_md_sync.sync_for_workspace(workspace)
         sync_hint = (
@@ -410,7 +454,7 @@ def project_context(workspace: str) -> str:
     except Exception:
         sync_hint = ""
 
-    return summary + sync_hint
+    return summary + sync_hint + _build_pending_distill_hint()
 
 
 @mcp.tool()
@@ -456,56 +500,91 @@ def pending_distill_count() -> str:
         - 用户开始新 chat 时，可主动调一次；如果 > 0 应告知用户「你有 N 个待整理」
         - 用户问「有什么要整理的吗」时
 
-    返回：人类可读的状态描述。示例：
-        "有 32 个待整理任务（最早 2 小时前）" 或 "暂无待整理任务"
+    返回：人类可读的状态描述，包含「今日已消化 X / cap」配额信息。
     """
     items = task_pack.list_pending(include_in_progress=False)
+    used = distill_quota.get_today_count()
+    cap = distill_quota.get_daily_cap()
+    quota_line = f"今日已消化：{used}/{cap}"
+
     if not items:
         in_prog = [x for x in task_pack.list_pending(include_in_progress=True)
                    if x["status"] == "in_progress"]
         if in_prog:
-            return f"暂无新待整理任务；{len(in_prog)} 个任务正在消化中。"
-        return "暂无待整理任务"
+            return f"暂无新待整理任务；{len(in_prog)} 个任务正在消化中。\n  {quota_line}"
+        return f"暂无待整理任务\n  {quota_line}"
+
     n = len(items)
     oldest = items[0]
     age_min = oldest["age_seconds"] // 60
     age_desc = f"{age_min} 分钟前" if age_min < 60 else f"{age_min // 60} 小时前"
+    remaining = max(0, cap - used)
+    if remaining == 0:
+        return (
+            f"📥 有 {n} 个待整理任务（最早 {age_desc}）。\n"
+            f"  ⛔ {quota_line}（今日额度已用尽，将顺延到明天）。\n"
+            f"  💡 突破今日上限：让用户喊『继续整理』，调 get_next_distill_task(force=True)。"
+        )
     return (
         f"📥 有 {n} 个待整理任务（最早 {age_desc}）。\n"
+        f"  ✓  {quota_line}（今日还可消化 {remaining} 条）。\n"
         f"  消化流程：\n"
         f"  1) 调 get_next_distill_task() 拿到 prompt + task_id\n"
         f"  2) 用你（宿主 agent）自己的 LLM 跑这个 prompt\n"
         f"  3) 把 YAML 结果通过 submit_distill_result(task_id, result) 提交\n"
-        f"  4) 重复 1-3 直到返回 \"暂无待整理任务\""
+        f"  4) 重复 1-3 直到返回 \"暂无待整理任务\" 或 \"今日额度已用尽\""
     )
 
 
 @mcp.tool()
-def get_next_distill_task() -> str:
+def get_next_distill_task(force: bool = False) -> str:
     """取下一个待蒸馏任务（原子操作，多 agent 并发安全），返回完整 prompt。
 
     使用步骤（loop 模式）：
       1. 调本工具 → 拿到 `task_id` 和 `prompt`
       2. 用你（宿主 agent）自己的 LLM 跑这个 prompt，得到 YAML 输出
       3. 调 submit_distill_result(task_id, result_yaml) 提交
-      4. 循环直到 pending_distill_count 返回 "暂无待整理任务"
+      4. 循环直到 pending_distill_count 返回 "暂无待整理任务" 或 "今日额度已用尽"
 
-    返回格式：
+    参数：
+        force : 突破当日消化上限。默认 False，超出 daily_cap 时拒绝并提示「明天继续」。
+                **仅当用户显式喊『继续整理』『强制突破』『今天必须跑完』时才传 True**——
+                否则会吃光用户当日 IDE LLM 配额、影响主业。
+
+    返回格式（成功）：
         TASK_ID: <12 位 hex>
-        SESSION_META: <ide / workspace / project_key 摘要>
+        SESSION_META: <ide / workspace / project_key / batch_date 摘要>
         PROMPT_START
         <完整 prompt 内容>
         PROMPT_END
 
+    返回格式（被上限拦下，force=False）：
+        ⛔ 今日额度已用尽 (X/cap)，剩 N 条任务将顺延到明天
+        想继续？传 force=True 突破上限。
+
     不要把 PROMPT_START/PROMPT_END 标记之间的内容发回给 user —— 那是给你自跑用的。
     """
+    if not force:
+        allowed, used, cap = distill_quota.can_take()
+        if not allowed:
+            n = len(task_pack.list_pending(include_in_progress=False))
+            return (
+                f"⛔ 今日额度已用尽（{used}/{cap}），还剩 {n} 条待整理任务。\n"
+                f"  • 默认行为：顺延到明天自动继续（保护你 IDE 当日 LLM 配额）。\n"
+                f"  • 突破今日上限：用户喊『继续整理』后调 get_next_distill_task(force=True)。"
+            )
+
     task = task_pack.take_next()
     if task is None:
         return "暂无待整理任务"
+    used_after = distill_quota.get_today_count()  # 注意 incr 在 submit 时做，这里只读
+    cap = distill_quota.get_daily_cap()
     return (
         f"TASK_ID: {task['task_id']}\n"
         f"SESSION_META: ide={task.get('ide','?')} workspace={task.get('workspace','')} "
-        f"project_key={task.get('project_key','null')}\n"
+        f"project_key={task.get('project_key','null')} "
+        f"batch_date={task.get('batch_date') or '?'} "
+        f"quota={used_after}/{cap}\n"
         f"PROMPT_START\n"
         f"{task.get('prompt','')}\n"
         f"PROMPT_END"
@@ -518,20 +597,27 @@ def submit_distill_result(task_id: str, result_yaml: str) -> str:
 
     result_yaml 必须是 1-step distill prompt 规定的格式（外层 `topics:` 数组）。
     服务端会：
-      - 按 should_keep 落盘到 personal/ projects/ 或 .cold/
+      - should_keep=true 的 topic 落盘到 personal/ 或 projects/<key>/
+      - should_keep=false 的 topic **直接丢弃**（不再写 .cold/，仅日志记录）
       - 写完后删除 .pending/<task_id>.task.in_progress
       - 已被人手编辑（source=manual/edited）的同 ID 文件会被保护不覆盖
 
-    返回：写入文件路径列表 + 错误（如有）。
+    返回：写入文件路径列表 + 丢弃数 + 错误（如有）。
     """
     if not task_id or not result_yaml:
         return "❌ 缺少 task_id 或 result_yaml"
     result = task_pack.submit_result(task_id, result_yaml)
     written = result.get("written") or []
-    cold = result.get("cold") or []
+    dropped = result.get("dropped") or []
     errors = result.get("errors") or []
+    # 任务包已被处理（task_pack 逻辑：errors 为空时 task 文件已被删除/不再重试）→ 计入今日配额
+    if not errors:
+        try:
+            distill_quota.incr_today()
+        except Exception:
+            pass
     # UX-1: 状态符号反映实际结果
-    if errors and not written and not cold:
+    if errors and not written and not dropped:
         marker = "❌ submit_distill_result"
     elif errors:
         marker = "⚠️  submit_distill_result（部分失败）"
@@ -543,10 +629,12 @@ def submit_distill_result(task_id: str, result_yaml: str) -> str:
     ]
     for p in written[:5]:
         lines.append(f"    - {p}")
-    if cold:
-        lines.append(f"  🧊 进冷存储: {len(cold)}")
-        for p in cold[:3]:
-            lines.append(f"    - {p}")
+    if dropped:
+        lines.append(f"  🗑  丢弃（LLM 判低价值，不入库）: {len(dropped)}")
+        for d in dropped[:3]:
+            title = d.get("title", "")
+            reason = d.get("reason", "")
+            lines.append(f"    - {title} — {reason}")
     if errors:
         lines.append(f"  ⚠️  错误: {len(errors)}")
         for e in errors[:3]:
@@ -601,15 +689,25 @@ def _self_check() -> int:
 
 
 def _maybe_trigger_lazy_distill() -> None:
-    """启动时静默触发 lazy distill（失败不阻塞 MCP 启动）"""
+    """启动时静默触发 lazy distill（失败不阻塞 MCP 启动）。
+
+    闸门由 lazy_trigger 内部按 llm.mode 自动选取：
+    - host_agent：4h 间隔、不限时段（任务包不调外部 LLM）
+    - api / local / auto：24h 间隔、22 点之后（避开 coding 高峰）
+    """
     try:
         result = lazy_trigger.maybe_trigger_background(range_arg="yesterday")
         if result["triggered"]:
             sys.stderr.write(
-                f"[ai-coding-memory] lazy distill triggered (pid={result['pid']})\n"
+                f"[ai-coding-memory] lazy distill triggered "
+                f"(pid={result['pid']}, mode={result.get('mode')})\n"
+            )
+        else:
+            sys.stderr.write(
+                f"[ai-coding-memory] lazy distill skipped: {result['reason']} "
+                f"(mode={result.get('mode')})\n"
             )
     except Exception as e:
-        # 不让 lazy trigger 失败阻塞 MCP 启动
         sys.stderr.write(f"[ai-coding-memory] lazy trigger skipped: {e}\n")
 
 

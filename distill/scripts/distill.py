@@ -5,8 +5,8 @@
     - 1-step：单次 LLM 调用产出最终 markdown + value + should_keep
     - 启发式过滤前置（heuristic_filter）
     - 双模式：api（同步并发）/ host_agent（写任务包给宿主 agent，P3 落地）
-    - 直接落盘到新数据模型 (~/.ai-memory/{personal,projects/<key>}/)，
-      should_keep=false 走 .cold/
+    - 直接落盘到新数据模型 (~/.ai-memory/{personal,projects/<key>}/)
+    - should_keep=false 的 topic **直接丢弃**（不再写 .cold/），仅日志记录
 
 CLI:
     python3 distill/scripts/distill.py --range today [--dry-run] [--mode api|host_agent]
@@ -14,9 +14,8 @@ CLI:
 
 输入：~/.ai-memory/raw/sessions/YYYY-MM-DD.json （由 collect 产出）
 输出：
-    ~/.ai-memory/{personal,projects/<key>}/<id>.md     should_keep=true
-    ~/.ai-memory/.cold/<id>.md                          should_keep=false
-    ~/.ai-memory/logs/distill-YYYY-MM-DD.log            执行日志
+    ~/.ai-memory/{personal,projects/<key>}/<id>.md     should_keep=true 入库
+    ~/.ai-memory/logs/distill-YYYY-MM-DD.log            执行日志（含 DROPPED 行）
     ~/.ai-memory/logs/filtered-YYYY-MM-DD.jsonl        启发式过滤记录
 
 退出码：
@@ -165,14 +164,19 @@ def distill_one_session(
     project_key_resolver=None,
     dry_run: bool = False,
     verbose: bool = False,
+    batch_date: str | None = None,
 ) -> dict:
     """处理一个 session，返回 stats dict
     {
         "session_id": str,
         "kept": int,         # 入库到 personal/projects 的 topic 数
-        "cold": int,         # 入冷存储的 topic 数
+        "dropped": int,      # LLM 判 should_keep=false 直接丢弃的 topic 数
         "error": str | None,
-    }"""
+    }
+
+    batch_date: 任务对应的会话日期 YYYY-MM-DD（init/lazy_trigger 应当传入）。
+        host_agent 模式下会写入 task pack，消化排队按此字段均摊。
+    """
     sid = session.get("sessionId", "?")
     workspace = session.get("workspace") or ""
     project_key = None
@@ -182,46 +186,53 @@ def distill_one_session(
             project_key = info["key"]
 
     if dry_run:
-        return {"session_id": sid, "kept": 0, "cold": 0, "skipped_reason": "dry-run"}
+        return {"session_id": sid, "kept": 0, "dropped": 0, "skipped_reason": "dry-run"}
 
     prompt = render_prompt(session, project_key)
     # host_agent 需要预先注入 session 上下文给任务包
     if hasattr(provider, "set_session_context"):
-        provider.set_session_context(session, project_key)
+        try:
+            provider.set_session_context(session, project_key, batch_date=batch_date)
+        except TypeError:
+            # 老 provider 不接受 batch_date kwarg —— 兼容兜底
+            provider.set_session_context(session, project_key)
     try:
         out = provider.run(prompt)
     except PendingTaskError as e:
         # host_agent 模式：任务已写入 .pending/，agent 后续消化
-        return {"session_id": sid, "kept": 0, "cold": 0, "pending_task": e.task_path}
+        return {"session_id": sid, "kept": 0, "dropped": 0, "pending_task": e.task_path}
     except (LLMCallError, NotImplementedError) as e:
-        return {"session_id": sid, "kept": 0, "cold": 0, "error": str(e)}
+        return {"session_id": sid, "kept": 0, "dropped": 0, "error": str(e)}
 
     topics = parse_llm_yaml(out)
     if not topics:
-        return {"session_id": sid, "kept": 0, "cold": 0, "error": "LLM 输出无可解析 topics"}
+        return {"session_id": sid, "kept": 0, "dropped": 0, "error": "LLM 输出无可解析 topics"}
 
     kept = 0
-    cold = 0
+    dropped = 0
     for t in topics:
         try:
-            mem = _topic_to_memory(t, session, project_key)
             if t.get("should_keep") is False:
-                ms.save_to_cold(mem)
-                cold += 1
-            else:
-                ms.save(mem, allow_overwrite_protected=False)
-                kept += 1
+                # 直接丢弃，不入库（cold 概念已废弃）
+                dropped += 1
+                if verbose:
+                    print(f"  [{sid[:8]}] DROPPED title={(t.get('title') or '')[:40]!r} "
+                          f"reason={(t.get('keep_reason') or '')[:60]!r}", file=sys.stderr)
+                continue
+            mem = _topic_to_memory(t, session, project_key)
+            ms.save(mem, allow_overwrite_protected=False)
+            kept += 1
             if verbose:
-                print(f"  [{sid[:8]}] {mem.scope}/{mem.id} value={mem.value} keep={t.get('should_keep') is not False}",
+                print(f"  [{sid[:8]}] KEPT {mem.scope}/{mem.id} value={mem.value}",
                       file=sys.stderr)
         except PermissionError as pe:
             # 用户已手编辑过同 ID 文件，不覆盖
-            return {"session_id": sid, "kept": kept, "cold": cold, "error": str(pe)}
+            return {"session_id": sid, "kept": kept, "dropped": dropped, "error": str(pe)}
         except Exception as e:
-            return {"session_id": sid, "kept": kept, "cold": cold,
+            return {"session_id": sid, "kept": kept, "dropped": dropped,
                     "error": f"save failed: {e}"}
 
-    return {"session_id": sid, "kept": kept, "cold": cold, "error": None}
+    return {"session_id": sid, "kept": kept, "dropped": dropped, "error": None}
 
 
 def _topic_to_memory(topic: dict, session: dict, project_key: str | None) -> Memory:
@@ -351,7 +362,7 @@ def _run_sync(
 ) -> int:
     start = time.time()
     total_kept = 0
-    total_cold = 0
+    total_dropped = 0
     total_failed = 0
     total_pending = 0
 
@@ -361,6 +372,7 @@ def _run_sync(
             project_key_resolver=project_key_resolver,
             dry_run=False,
             verbose=verbose,
+            batch_date=date_key,
         )
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as ex:
@@ -375,11 +387,11 @@ def _run_sync(
                 continue
 
             kept = result.get("kept", 0)
-            cold = result.get("cold", 0)
+            dropped = result.get("dropped", 0)
             err = result.get("error")
             pending_task = result.get("pending_task")
             total_kept += kept
-            total_cold += cold
+            total_dropped += dropped
             if err:
                 total_failed += 1
                 append_log(date_key, f"FAILED {result['session_id']}: {err}")
@@ -389,12 +401,12 @@ def _run_sync(
                 append_log(date_key, f"PENDING {result['session_id']} → {pending_task}")
                 marker = " pending"
             else:
-                append_log(date_key, f"OK {result['session_id']}: kept={kept} cold={cold}")
+                append_log(date_key, f"OK {result['session_id']}: kept={kept} dropped={dropped}")
                 marker = ""
-            print(f"  [{i}/{len(sessions)}] kept={kept} cold={cold}{marker}")
+            print(f"  [{i}/{len(sessions)}] kept={kept} dropped={dropped}{marker}")
 
     dur = time.time() - start
-    summary = f"kept={total_kept} cold={total_cold} pending={total_pending} failed={total_failed}"
+    summary = f"kept={total_kept} dropped={total_dropped} pending={total_pending} failed={total_failed}"
     print(f"\n✓ done in {dur:.1f}s — {summary}")
     if total_pending > 0:
         print(f"💡 {total_pending} 个任务包待消化。"

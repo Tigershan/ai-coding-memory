@@ -6,13 +6,15 @@
 
 行为：
     1. 读 ~/.ai-memory/.last_distill 时间戳
-    2. 距上次 < min_interval_hours → 跳过
-    3. 当前小时 < min_hour（默认 22 点）且不是首次 → 跳过（避免 coding 高峰抢 LLM 配额）
-       注：host_agent 模式下不抢用户 LLM 配额（任务包不调 LLM），可放宽此限制
-    4. 尝试拿 fcntl 文件锁 ~/.ai-memory/.distill.lock；
+    2. 闸门按 llm.mode 分别取值（caller 显式 > config.yml > mode 默认）：
+       - host_agent：min_interval=4h，min_hour=None（不限时段，任务包不调外部 LLM）
+       - api / local / auto：min_interval=24h，min_hour=22（避开 coding 高峰，集中跑）
+    3. 距上次 < min_interval_hours → 跳过
+    4. min_hour 非 None 且当前小时 < min_hour 且不是首次 → 跳过
+    5. 尝试拿 fcntl 文件锁 ~/.ai-memory/.distill.lock；
        拿不到（其他 IDE 已在跑）→ 跳过
-    5. fork detached 子进程跑 distill；锁文件 fd 传递给子进程持有
-    6. 子进程完成后更新 .last_distill，释放锁
+    6. fork detached 子进程跑 distill（mode 透传给子进程）；锁文件 fd 传递给子进程持有
+    7. 子进程完成后更新 .last_distill，释放锁
 
 实现细节：
     - fork 用 subprocess.Popen + start_new_session=True，IDE 关闭不杀子进程
@@ -44,6 +46,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core import config as user_config  # noqa: E402
 from core.paths import (  # noqa: E402
     DATA_ROOT,
     DISTILL_LOCK_PATH,
@@ -52,14 +55,47 @@ from core.paths import (  # noqa: E402
 )
 
 
-DEFAULT_MIN_INTERVAL_HOURS = 24
-DEFAULT_MIN_HOUR = 22  # 当地小时；< 此值不跑（host_agent 模式可放宽）
+# api / local / auto：避开 coding 高峰，集中夜间跑（且 24h 间隔避免重复消耗 API 配额）
+GATES_API_LIKE = {"min_interval_hours": 24, "min_hour": 22}
+# host_agent：任务包不调外部 LLM，闸门可放宽——但仍需 4h 间隔避免 IDE 频繁开关导致重复 spawn
+GATES_HOST_AGENT = {"min_interval_hours": 4, "min_hour": None}
+
+_UNSET = object()
+
+
+def _resolve_mode(mode: str | None) -> str:
+    """解析最终 mode：caller 显式 > config.yml > host_agent（默认）"""
+    if mode:
+        return mode
+    cfg_mode = user_config.get_value("llm.mode")
+    if cfg_mode and cfg_mode != "auto":
+        return cfg_mode
+    return "host_agent"
+
+
+def _resolve_gates(mode: str, min_interval_hours, min_hour) -> tuple[int, int | None]:
+    """优先级：caller 显式 > 用户 config.yml lazy_trigger.* > mode 默认"""
+    user_cfg = user_config.get_value("lazy_trigger", default={}) or {}
+
+    defaults = GATES_HOST_AGENT if mode == "host_agent" else GATES_API_LIKE
+
+    if min_interval_hours is _UNSET:
+        min_interval_hours = user_cfg.get("min_interval_hours", defaults["min_interval_hours"])
+
+    if min_hour is _UNSET:
+        # config.yml 里若显式写了 min_hour（包括 null）则尊重；否则按 mode 默认
+        if "min_hour" in user_cfg:
+            min_hour = user_cfg["min_hour"]
+        else:
+            min_hour = defaults["min_hour"]
+
+    return int(min_interval_hours), (None if min_hour is None else int(min_hour))
 
 
 def maybe_trigger_background(
     *,
-    min_interval_hours: int = DEFAULT_MIN_INTERVAL_HOURS,
-    min_hour: int | None = DEFAULT_MIN_HOUR,
+    min_interval_hours=_UNSET,
+    min_hour=_UNSET,
     range_arg: str = "yesterday",
     mode: str | None = None,
     force: bool = False,
@@ -69,40 +105,57 @@ def maybe_trigger_background(
         "triggered": bool,
         "reason": str,
         "pid": int | None,
+        "mode": str,                  # 实际使用的 mode（便于调用方/日志观察）
+        "min_interval_hours": int,
+        "min_hour": int | None,
     }
     """
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+    resolved_mode = _resolve_mode(mode)
+    eff_interval, eff_min_hour = _resolve_gates(resolved_mode, min_interval_hours, min_hour)
+
+    base_meta = {
+        "mode": resolved_mode,
+        "min_interval_hours": eff_interval,
+        "min_hour": eff_min_hour,
+    }
+
     # 1. 间隔检查
     if not force:
         last = _read_last_distill_ts()
-        if last and (time.time() - last) < min_interval_hours * 3600:
-            return {"triggered": False, "reason": "interval-too-short", "pid": None}
+        if last and (time.time() - last) < eff_interval * 3600:
+            return {"triggered": False, "reason": "interval-too-short", "pid": None, **base_meta}
 
-    # 2. 时段检查
-    if not force and min_hour is not None:
+    # 2. 时段检查（host_agent 模式 min_hour=None → 跳过本检查）
+    if not force and eff_min_hour is not None:
         now_hour = datetime.now().hour
         first_ever = _read_last_distill_ts() is None
-        if not first_ever and now_hour < min_hour:
-            return {"triggered": False, "reason": f"before-min-hour-{min_hour}", "pid": None}
+        if not first_ever and now_hour < eff_min_hour:
+            return {
+                "triggered": False,
+                "reason": f"before-min-hour-{eff_min_hour}",
+                "pid": None,
+                **base_meta,
+            }
 
     # 3. 文件锁
     if not _HAS_FCNTL:
-        return {"triggered": False, "reason": "no-fcntl-support", "pid": None}
+        return {"triggered": False, "reason": "no-fcntl-support", "pid": None, **base_meta}
 
     lock_fd = _try_acquire_lock()
     if lock_fd is None:
-        return {"triggered": False, "reason": "lock-held-elsewhere", "pid": None}
+        return {"triggered": False, "reason": "lock-held-elsewhere", "pid": None, **base_meta}
 
-    # 4. fork distill 子进程
-    pid = _spawn_distill(range_arg, mode, lock_fd)
+    # 4. fork distill 子进程（mode 透传，确保子进程按目标模式跑）
+    pid = _spawn_distill(range_arg, resolved_mode, lock_fd)
     if pid is None:
-        # spawn 失败，立刻释放锁
         _release_lock(lock_fd)
-        return {"triggered": False, "reason": "spawn-failed", "pid": None}
+        return {"triggered": False, "reason": "spawn-failed", "pid": None, **base_meta}
 
-    _log(f"triggered distill pid={pid} range={range_arg} mode={mode or 'auto'}")
-    return {"triggered": True, "reason": "ok", "pid": pid}
+    _log(f"triggered distill pid={pid} range={range_arg} mode={resolved_mode} "
+         f"interval={eff_interval}h min_hour={eff_min_hour}")
+    return {"triggered": True, "reason": "ok", "pid": pid, **base_meta}
 
 
 # ==================== 内部 ====================

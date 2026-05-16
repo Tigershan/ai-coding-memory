@@ -189,7 +189,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
     if p:
         print(f"✓ 已恢复至：{p}")
         return 0
-    print(f"❌ 未在 archive/.cold 中找到 {args.id}", file=sys.stderr)
+    print(f"❌ 未在 archive/ 中找到 {args.id}", file=sys.stderr)
     return 1
 
 
@@ -276,7 +276,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     from core import memory_store as ms
     from core import recall_log
     from core import task_pack
-    from core.paths import COLD_DIR, ARCHIVE_DIR, LOG_DIR
+    from core.paths import ARCHIVE_DIR, LOG_DIR
 
     # 1. memory 总量
     all_mems = ms.list_memories(include_archived=False)
@@ -294,8 +294,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         if m.potentially_superseded_by:
             with_superseded += 1
 
-    # 2. 冷存储 + 归档
-    cold_count = len(list(COLD_DIR.glob("*.md"))) if COLD_DIR.exists() else 0
+    # 2. archive
     archive_count = len(list(ARCHIVE_DIR.glob("*.md"))) if ARCHIVE_DIR.exists() else 0
 
     # 3. 任务包
@@ -315,7 +314,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
     print(f"📊 ai-memory stats (recall window = past {args.since_days} days)")
     print()
-    print(f"📚 Memory 总览（不含 archived / cold）")
+    print(f"📚 Memory 总览（不含 archived）")
     print(f"   总数：{len(all_mems)}")
     print(f"   by scope:   {dict(sorted(by_scope.items()))}")
     print(f"   by source:  {dict(sorted(by_source.items()))}")
@@ -324,8 +323,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(f"   ⚠️ 含 potential_conflicts: {with_conflicts}  "
               f"被标 superseded: {with_superseded}")
     print()
-    print(f"🧊 冷存储: {cold_count}    📦 archive: {archive_count}    "
-          f"📥 pending tasks: {pending}    🚫 过滤累计: {filter_count}")
+    print(f"📦 archive: {archive_count}    "
+          f"📥 pending tasks: {pending}    🚫 启发式过滤累计: {filter_count}")
     print()
     print(f"🔍 召回（过去 {stats['since_days']} 天）")
     print(f"   search 调用: {stats['n_search']}")
@@ -442,7 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_arch.set_defaults(func=cmd_archive)
 
     # restore
-    p_rst = sub.add_parser("restore", help="从 archive/.cold 恢复")
+    p_rst = sub.add_parser("restore", help="从 archive/ 恢复")
     p_rst.add_argument("id")
     p_rst.set_defaults(func=cmd_restore)
 

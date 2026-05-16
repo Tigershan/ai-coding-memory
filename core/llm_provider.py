@@ -227,6 +227,7 @@ class HostAgentProvider(LLMProvider):
         self.cfg = cfg
         self._session: dict | None = None
         self._project_key: str | None = None
+        self._batch_date: str | None = None
 
     @property
     def mode(self) -> str:
@@ -235,10 +236,16 @@ class HostAgentProvider(LLMProvider):
     def is_synchronous(self) -> bool:
         return False
 
-    def set_session_context(self, session: dict, project_key: str | None) -> None:
-        """distill 主流程在每个 session 调 run() 之前调一下，注入元数据"""
+    def set_session_context(self, session: dict, project_key: str | None,
+                            *, batch_date: str | None = None) -> None:
+        """distill 主流程在每个 session 调 run() 之前调一下，注入元数据。
+
+        batch_date: 任务对应的会话日期 YYYY-MM-DD（init/lazy_trigger 应当传入）。
+            消化时按 batch_date 升序排队，让多天历史均摊到多天里慢慢消化。
+        """
         self._session = session
         self._project_key = project_key
+        self._batch_date = batch_date
 
     def run(self, prompt: str, *, system: str = "") -> str:
         from . import task_pack
@@ -248,7 +255,10 @@ class HostAgentProvider(LLMProvider):
         else:
             session = self._session
         full_prompt = (system + "\n\n" + prompt) if system else prompt
-        task_id = task_pack.write_task(full_prompt, session, self._project_key)
+        task_id = task_pack.write_task(
+            full_prompt, session, self._project_key,
+            batch_date=self._batch_date,
+        )
         raise PendingTaskError(
             task_id=task_id,
             task_path=str(task_pack.PENDING_DIR / f"{task_id}.task"),

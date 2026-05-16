@@ -64,7 +64,6 @@ from core.paths import (
     DATA_ROOT as PATHS_ROOT,
     PERSONAL_DIR,
     PROJECTS_DIR,
-    COLD_DIR,
     PENDING_DIR,
     ARCHIVE_DIR,
     LOG_DIR,
@@ -383,12 +382,9 @@ written = list(proj_dir.glob("*.md"))
 print(f"  projects/repo-a now contains {len(written)} files:")
 for p in written:
     print(f"    {p.name}")
-cold_files = list(COLD_DIR.glob("*.md"))
-print(f"  cold dir has {len(cold_files)} files:")
-for p in cold_files:
-    print(f"    {p.name}")
+# cold concept removed: should_keep=false now directly dropped (no .cold/ dir)
 assert any("synthetic" in p.name for p in written), "synthetic memory should land in project dir"
-print("  PASS: task pack full lifecycle")
+print("  PASS: task pack full lifecycle (cold concept removed)")
 
 
 # ====================================================================

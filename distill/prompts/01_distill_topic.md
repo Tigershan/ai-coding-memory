@@ -53,7 +53,8 @@ topics:
   - 内容已是常识或文档查询（百度/官方文档随手能搜到的事实）
   - 用户提问含糊、AI 回答未形成结论
   - 是 debugging 过程未找到根因（无沉淀价值）
-  这些 topic 仍应输出 yaml，但 should_keep=false 让它进 .cold/
+  这些 topic 仍应输出 yaml，但 **should_keep=false 会被直接丢弃**（不入库、不留底）
+  → 所以 keep_reason 字段虽然不影响存储，仍应认真写：日志会保留它便于审计
 
 【拆分原则】
 - 一段对话原则上对应**一个** topic。

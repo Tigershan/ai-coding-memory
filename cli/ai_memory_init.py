@@ -94,7 +94,11 @@ def clear_progress() -> None:
 # ==================== Phase A: 扫描 ====================
 
 def scan_sessions(range_arg: str, ide_filter: set[str] | None = None) -> list[dict]:
-    """枚举范围内所有 sessions（已展开为 dict 列表）"""
+    """枚举范围内所有 sessions（已展开为 dict 列表）。
+
+    每个 session 上会附 `_batch_date` 字段（YYYY-MM-DD），用于 host_agent 任务包
+    按天均摊消化（避免一次性把 N 天历史扔到当天的 IDE 配额上）。
+    """
     out: list[dict] = []
     for date_key in enumerate_dates(range_arg):
         raw = load_sessions(date_key)
@@ -103,6 +107,7 @@ def scan_sessions(range_arg: str, ide_filter: set[str] | None = None) -> list[di
         for s in raw.get("sessions") or []:
             if ide_filter and s.get("ide") not in ide_filter:
                 continue
+            s.setdefault("_batch_date", date_key)
             out.append(s)
     return out
 
@@ -205,8 +210,25 @@ def cmd_init(args: argparse.Namespace) -> int:
         if args.budget_max and info["est_yuan"] > args.budget_max:
             print(f"   ⚠️  超过 --budget-max ¥{args.budget_max:.2f}，将在跑满预算后停止")
     else:
-        print(f"   host_agent 模式：将生成 {info['est_calls']} 个任务包到 .pending/")
-        print(f"   消化方式：打开 IDE 后说『整理今日记忆』")
+        n = info["est_calls"]
+        # 默认每日上限（与 distill_quota / config 默认值保持一致）
+        try:
+            from core import config as _ucfg
+            daily_cap = int(_ucfg.get_value("distill.daily_cap") or 10)
+        except Exception:
+            daily_cap = 10
+        days_to_finish = (n + daily_cap - 1) // daily_cap
+        print(f"   host_agent 模式：将生成 {n} 个任务包到 .pending/")
+        print(f"   ⚠️  消化代价：每个任务包消化时会调用 1 次宿主 IDE 的 LLM（你的实时配额）")
+        print(f"      → {n} 条 = 接下来你 IDE 里多 {n} 轮 chat 体量")
+        print(f"   默认每日上限 {daily_cap} 条（防止一次性吃光当日配额）")
+        print(f"      按 {daily_cap}/天 涓流：约 {days_to_finish} 天消化完")
+        print(f"   消化方式：")
+        print(f"      • 自动涓流：打开 IDE 自然产生 chat 时每次自动消化 1 条")
+        print(f"      • 主动批量：喊『整理今日记忆』，跑到当日上限即停（提示明天继续）")
+        print(f"      • 强制突破：喊『继续整理』可越过当日上限")
+        print(f"   💡 想要『零配额占用 + 后台并发完成』？")
+        print(f"      → export DASHSCOPE_API_KEY=..., 跑 ai-memory config set llm.mode api，再 init")
 
     if not args.yes:
         ans = input("\n继续？[y/N] ").strip().lower()
@@ -248,6 +270,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             project_key_resolver=resolve_project_key,
             dry_run=False,
             verbose=False,
+            batch_date=s.get("_batch_date"),
         )
         sid = result["session_id"]
         if "pending_task" in result:

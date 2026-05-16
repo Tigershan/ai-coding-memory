@@ -39,8 +39,11 @@ DEFAULT_CONFIG: dict = {
     },
     "lazy_trigger": {
         "enabled": True,
-        "min_hour": 22,              # 当地小时 ≥ 此值才跑（避免 coding 高峰）
+        "min_hour": 22,              # 当地小时 ≥ 此值才跑（avoid coding 高峰；host_agent 模式自动放宽）
         "min_interval_hours": 24,
+    },
+    "distill": {
+        "daily_cap": 10,             # host_agent 模式下每日消化上限（保护宿主 IDE LLM 配额）
     },
 }
 

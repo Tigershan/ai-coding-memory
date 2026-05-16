@@ -5,9 +5,8 @@
     ~/.ai-memory/
     ├── personal/                     跨项目通用 memory（人 + AI）
     ├── projects/<key>/               项目专属 memory
-    ├── .cold/                        冷存储（LLM 判低价值但保留）
     ├── .pending/                     host_agent 模式下挂起的 distill 任务包
-    ├── archive/                      用户/系统归档
+    ├── archive/                      用户/系统归档（包括手动 archive 和未来 reflect 归档）
     ├── raw/sessions/                 collect 阶段产出
     ├── wiki/                         旧 llm-wiki 布局（过渡期保留）
     ├── config/
@@ -37,7 +36,6 @@ DATA_ROOT: Path = _resolve_data_root()
 
 PERSONAL_DIR: Path = DATA_ROOT / "personal"
 PROJECTS_DIR: Path = DATA_ROOT / "projects"
-COLD_DIR: Path = DATA_ROOT / ".cold"
 PENDING_DIR: Path = DATA_ROOT / ".pending"
 ARCHIVE_DIR: Path = DATA_ROOT / "archive"
 
@@ -65,7 +63,7 @@ LOG_DIR: Path = DATA_ROOT / "logs"
 def ensure_data_dirs() -> None:
     """幂等创建所有运行时数据目录"""
     for d in (
-        PERSONAL_DIR, PROJECTS_DIR, COLD_DIR, PENDING_DIR, ARCHIVE_DIR,
+        PERSONAL_DIR, PROJECTS_DIR, PENDING_DIR, ARCHIVE_DIR,
         WIKI_ROOT, RAW_SESSIONS_DIR, CONFIG_DIR, LOG_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
