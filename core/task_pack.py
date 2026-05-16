@@ -147,7 +147,7 @@ def take_next() -> dict | None:
         except (json.JSONDecodeError, OSError):
             # 文件读不出来，移到 failed 跳过
             try:
-                os.rename(dst, dst.with_suffix(".task.failed"))
+                os.rename(dst, dst.parent / dst.name.replace(SUFFIX_IN_PROGRESS, SUFFIX_FAILED))
             except OSError:
                 pass
             continue
@@ -192,9 +192,38 @@ def submit_result(task_id: str, result_yaml: str) -> dict:
         # 不删 task；让 agent 看到错误重试
         return {"written": [], "cold": [], "errors": [f"YAML 解析失败：{e}"]}
 
-    topics = parsed.get("topics") or []
+    # 严格检查：必须含 topics key（即使是空 list）。
+    # 缺失说明 LLM 输出不合规或解析器没找到该字段（如 ``` 围栏外有杂文本），
+    # 此时**不删 task**——保留给 agent 重试，避免 silent data loss。
+    if "topics" not in parsed:
+        snippet = (s[:300] + "...") if len(s) > 300 else s
+        # 标记任务为 failed 而不是简单跳过，便于 ai-memory pending 看到
+        if src.name.endswith(SUFFIX_IN_PROGRESS):
+            try:
+                failed_path = src.parent / src.name.replace(SUFFIX_IN_PROGRESS, SUFFIX_FAILED)
+                os.rename(src, failed_path)
+            except OSError:
+                pass
+        return {
+            "written": [], "cold": [],
+            "errors": [
+                "topics 字段缺失：LLM 输出可能未按要求格式。任务包标记为 failed。",
+                f"输出前 300 字预览：{snippet}",
+            ],
+        }
+
+    topics = parsed.get("topics")
     if not isinstance(topics, list):
-        return {"written": [], "cold": [], "errors": ["topics 不是 list"]}
+        # 显式非 list 也算 LLM 格式错误 → 不删 task
+        if src.name.endswith(SUFFIX_IN_PROGRESS):
+            try:
+                os.rename(src, src.parent / src.name.replace(SUFFIX_IN_PROGRESS, SUFFIX_FAILED))
+            except OSError:
+                pass
+        return {
+            "written": [], "cold": [],
+            "errors": [f"topics 不是 list（实际类型: {type(topics).__name__}）"],
+        }
 
     # 落盘
     from . import memory_store as ms
@@ -226,11 +255,22 @@ def submit_result(task_id: str, result_yaml: str) -> dict:
         except Exception as e:
             errors.append(f"save failed: {e}")
 
-    # 成功（即便部分失败）→ 删 task
-    try:
-        src.unlink()
-    except OSError:
-        pass
+    # 删除任务包仅当：parsed 含 topics key 且至少有一条成功落盘
+    # 或：topics: [] 明确表示 LLM 判该 session 无价值（合法选择，不算失败）
+    something_done = bool(written) or bool(cold)
+    intentional_empty = len(topics) == 0
+    if something_done or intentional_empty:
+        try:
+            src.unlink()
+        except OSError:
+            pass
+    else:
+        # 有 topics 但全部 save 失败 → 标 failed 留诊断
+        if src.name.endswith(SUFFIX_IN_PROGRESS):
+            try:
+                os.rename(src, src.parent / src.name.replace(SUFFIX_IN_PROGRESS, SUFFIX_FAILED))
+            except OSError:
+                pass
 
     return {"written": written, "cold": cold, "errors": errors}
 

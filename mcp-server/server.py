@@ -100,12 +100,16 @@ def _safe_render_search_results(results: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def _is_path_inside_wiki(p: Path) -> bool:
-    """安全检查：防止 read_page 读到 wiki 之外的文件"""
+def _is_path_inside_memory_root(p: Path) -> bool:
+    """安全检查：防止 read_page 读到 ~/.ai-memory/ 之外的文件。
+
+    覆盖新数据布局（personal/ projects/ archive/ .cold/）和旧 wiki/。
+    """
     try:
         resolved = p.resolve()
-        wiki_resolved = WIKI_ROOT.resolve()
-        return str(resolved).startswith(str(wiki_resolved) + "/") or resolved == wiki_resolved
+        root_resolved = DATA_ROOT.resolve()
+        root_str = str(root_resolved)
+        return str(resolved).startswith(root_str + "/") or resolved == root_resolved
     except OSError:
         return False
 
@@ -178,20 +182,21 @@ def read_page(path: str) -> str:
     """读取知识库中某个具体页面的完整内容。
 
     TRIGGER：当 search_memory 返回了 Top K 结果后，模型想看某条结果的完整内容时。
-            或用户直接给出一个 wiki 内的文件路径（如 entity 页、topic 页）。
+            或用户直接给出一个 ~/.ai-memory/ 子树内的文件路径。
 
-    DON'T TRIGGER：路径在 ~/.ai-memory/wiki/ 之外的文件（会被安全机制拒绝）。
+    DON'T TRIGGER：路径在 ~/.ai-memory/ 之外的文件（会被安全机制拒绝）。
 
     参数：
-        path : 知识库内的绝对路径，必须位于 ~/.ai-memory/wiki/ 子树内
+        path : 知识库内的绝对路径，必须位于 ~/.ai-memory/ 子树内
+               （covers personal/ projects/ archive/ .cold/ wiki/）
 
     返回：文件原始 Markdown 内容（超出 60KB 时截断并提示）。
     """
     p = Path(path).expanduser()
-    if not _is_path_inside_wiki(p):
+    if not _is_path_inside_memory_root(p):
         return (
-            f"❌ 拒绝读取：`{p}` 不在知识库根 `{WIKI_ROOT}` 内。\n"
-            "出于安全考虑，本工具只允许读取 wiki 子树。"
+            f"❌ 拒绝读取：`{p}` 不在记忆库根 `{DATA_ROOT}` 内。\n"
+            "出于安全考虑，本工具只允许读取 ~/.ai-memory/ 子树。"
         )
     if not p.exists():
         return f"❌ 文件不存在：`{p}`"
@@ -260,8 +265,11 @@ def list_topics(scope: str = "auto", workspace: str = None) -> str:
         f"**workspace**: `{effective_ws or '(unknown)'}`  ",
         f"**scope**: `{scope_info['mode']}` "
         f"→ {len(grouped)} path(s), {len(items)} topic(s)",
-        "",
     ]
+    # UX-6: 把 scope_info warnings 也展示，与 search_memory 一致
+    if scope_info.get("warnings"):
+        lines.append("⚠️ " + "; ".join(scope_info["warnings"]))
+    lines.append("")
     for sub_name, sub_items in grouped.items():
         lines.append(f"### 📚 {sub_name} ({len(sub_items)})")
         for it in sub_items:
@@ -321,6 +329,9 @@ def remember(text: str, scope: str = "auto", tags: list[str] = None,
             else:
                 # scope=project 但 workspace 不在 git 中：兜底 personal
                 effective_scope = "personal"
+        else:
+            # scope=project 但没传 workspace：无法定位 → 兜底 personal
+            effective_scope = "personal"
     # personal: 不需要 project_key
 
     # 标题提取：用户写了 # 就用第一行；否则用前 30 字
@@ -415,6 +426,15 @@ def forget(memory_id: str) -> str:
     返回：归档路径 + 恢复命令。
     安全：不删除文件，只移到 archive/，可通过 ai-memory restore 恢复。
     """
+    # UX-4: 先检查是否已经在 archive/，避免重复 forget 误报 ✓
+    from core.paths import ARCHIVE_DIR
+    already = ARCHIVE_DIR / f"{memory_id}.md"
+    if already.exists():
+        return (
+            f"ℹ️  `{memory_id}` 已经在 archive/ 中（之前归档过）。\n"
+            f"  📄 archive 路径：`{already}`\n"
+            f"  💡 恢复命令：`ai-memory restore {memory_id}`"
+        )
     p = ms.archive(memory_id)
     if p is None:
         return f"❌ 未找到 memory id：`{memory_id}`"
@@ -510,8 +530,15 @@ def submit_distill_result(task_id: str, result_yaml: str) -> str:
     written = result.get("written") or []
     cold = result.get("cold") or []
     errors = result.get("errors") or []
+    # UX-1: 状态符号反映实际结果
+    if errors and not written and not cold:
+        marker = "❌ submit_distill_result"
+    elif errors:
+        marker = "⚠️  submit_distill_result（部分失败）"
+    else:
+        marker = "✓ submit_distill_result"
     lines = [
-        f"✓ submit_distill_result({task_id}):",
+        f"{marker} ({task_id}):",
         f"  📝 写入 memory: {len(written)}",
     ]
     for p in written[:5]:
@@ -524,6 +551,10 @@ def submit_distill_result(task_id: str, result_yaml: str) -> str:
         lines.append(f"  ⚠️  错误: {len(errors)}")
         for e in errors[:3]:
             lines.append(f"    - {e}")
+        lines.append(
+            "  💡 任务包已标记为 .task.failed（保留在 .pending/）；"
+            "修复输出格式后可重 take 或手动处理"
+        )
     return "\n".join(lines)
 
 
