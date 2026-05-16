@@ -57,18 +57,31 @@ _LIST_PATTERN = re.compile(r"^(\s*)-\s*(.*)$")
 
 
 def _parse_yaml(text: str) -> dict:
-    """最小 YAML 子集 parser。支持 key: value、嵌套 key:、行内 list [a, b]、块 list "- item"。"""
-    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    """最小 YAML 子集 parser。
+    支持：
+        - key: value
+        - 嵌套 key:（嵌套 dict）
+        - 行内 list [a, b, c]
+        - 块 list "- item"
+        - YAML block scalar `key: |` 多行字符串（literal）
+        - YAML folded scalar `key: >` 多行字符串（fold 为单行，简化处理）
+    """
+    raw_lines = text.splitlines()  # 保留所有行（不过滤空行，block scalar 需要）
+    # 先收集"有效行"列表，但记录原始 index，便于 block scalar 抓取
     root: dict = {}
-    # 用栈维护缩进上下文：每项 (indent, container)
     stack: list[tuple[int, Any]] = [(-1, root)]
     i = 0
-    while i < len(lines):
-        line = lines[i]
+    while i < len(raw_lines):
+        raw = raw_lines[i]
+        # 跳过空行 / 注释行
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        line = raw.rstrip()
         kv = _KV_PATTERN.match(line)
         lst = _LIST_PATTERN.match(line)
 
-        # 退栈到当前缩进的父
         if kv:
             indent = len(kv.group(1))
             key = kv.group(2)
@@ -77,17 +90,66 @@ def _parse_yaml(text: str) -> dict:
                 stack.pop()
             parent = stack[-1][1] if stack else root
             if not isinstance(parent, dict):
-                # 异常：非 dict 容器接收 key:value，强制兜底成字符串
                 i += 1
+                continue
+            # block scalar: `key: |` 或 `key: >`
+            if raw_val in ("|", ">", "|-", ">-", "|+", ">+"):
+                style = raw_val[0]   # "|" or ">"
+                # 收集所有后续比 indent 更深缩进的非空行作为内容
+                j = i + 1
+                block_lines: list[str] = []
+                block_indent: int | None = None
+                while j < len(raw_lines):
+                    bl = raw_lines[j]
+                    if bl.strip() == "":
+                        # 空行：保留（literal）/ 视为段落分隔（folded）
+                        block_lines.append("")
+                        j += 1
+                        continue
+                    bl_indent = len(bl) - len(bl.lstrip(" "))
+                    if bl_indent <= indent:
+                        break  # 缩进回到或浅于 key，block 结束
+                    if block_indent is None:
+                        block_indent = bl_indent
+                    # 去掉 block_indent 的前导空格
+                    block_lines.append(bl[block_indent:] if bl.startswith(" " * block_indent) else bl.lstrip())
+                    j += 1
+                # 拼接
+                if style == "|":
+                    content = "\n".join(block_lines)
+                else:  # ">" folded（简化：把单换行变空格，双换行保留）
+                    content_parts: list[str] = []
+                    buf: list[str] = []
+                    for ln in block_lines:
+                        if ln == "":
+                            if buf:
+                                content_parts.append(" ".join(buf))
+                                buf = []
+                            content_parts.append("")
+                        else:
+                            buf.append(ln)
+                    if buf:
+                        content_parts.append(" ".join(buf))
+                    content = "\n".join(content_parts)
+                # 处理 chomping indicator: "-" 去掉末尾换行；"+" 保留所有
+                if raw_val.endswith("-"):
+                    content = content.rstrip("\n")
+                elif not raw_val.endswith("+"):
+                    # 默认 clip：保留单个末尾换行
+                    content = content.rstrip("\n") + ("\n" if block_lines and block_lines[-1] != "" else "")
+                parent[key] = content
+                i = j
                 continue
             if raw_val == "":
                 # 嵌套 dict 或后续 list
-                # peek 下一行决定容器类型
                 next_idx = i + 1
+                # 跳过空白行 peek 下一有效行
+                while next_idx < len(raw_lines) and not raw_lines[next_idx].strip():
+                    next_idx += 1
                 next_indent = -1
                 next_is_list = False
-                if next_idx < len(lines):
-                    nl = lines[next_idx]
+                if next_idx < len(raw_lines):
+                    nl = raw_lines[next_idx]
                     next_kv = _KV_PATTERN.match(nl)
                     next_lst = _LIST_PATTERN.match(nl)
                     if next_lst:
