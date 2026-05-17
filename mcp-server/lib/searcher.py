@@ -114,12 +114,21 @@ def search_with_scope(
             continue
 
         scored = idx.scores(q)
-        # 取 top N（max_results_before_rerank * 1.5 上限，防止小 scope 排序退化）
+        # BM25Okapi 在小语料下 IDF 可能为负（出现在 > 半数文档时）；先按原分排序，
+        # 但对每个 scope 整体平移到 ≥ 0，避免 value/source 加权（>1）反而压低高分。
         scored.sort(key=lambda kv: -kv[1])
+        if scored:
+            min_s = min(s for _, s in scored)
+            shift = (-min_s + 1.0) if min_s < 0 else 0.0
+        else:
+            shift = 0.0
         candidate_cap = int(max_results_before_rerank * 1.5)
         for md_file, bm25_score in scored[:candidate_cap]:
-            if bm25_score <= 0.0:
+            # 仅把"完全无匹配 → 与 corpus 最低分相同 → 平移后 = shift（即 1.0 或 0.0）"
+            # 的文档排除。这里用原始 bm25_score 是否 ≈ 0 判断
+            if abs(float(bm25_score)) < 1e-9:
                 continue
+            adjusted_bm25 = float(bm25_score) + shift
             try:
                 text = md_file.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
@@ -145,7 +154,7 @@ def search_with_scope(
                 half_life_days=half_life_days, floor=decay_floor,
             )
 
-            score = bm25_score * value_w * source_w * superseded_w * cross_w * decay_w
+            score = adjusted_bm25 * value_w * source_w * superseded_w * cross_w * decay_w
             raw.append({
                 "source": "bm25",
                 "path": str(md_file),
