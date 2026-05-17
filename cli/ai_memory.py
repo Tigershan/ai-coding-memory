@@ -201,6 +201,8 @@ def cmd_distill(args: argparse.Namespace) -> int:
     forwarded = ["--range", args.range]
     if args.mode:
         forwarded += ["--mode", args.mode]
+    if getattr(args, "mode_hint", None):
+        forwarded += ["--mode-hint", args.mode_hint]
     if args.concurrency:
         forwarded += ["--concurrency", str(args.concurrency)]
     if args.dry_run:
@@ -459,6 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_dist = sub.add_parser("distill", help="蒸馏当日 sessions 为 memory")
     p_dist.add_argument("--range", default="today",
                         help="today | yesterday | YYYY-MM-DD")
+    p_dist.add_argument("--mode-hint", choices=["daily", "batch"], dest="mode_hint",
+                        help="场景提示：daily=增量（默认），batch=批量回溯。无 --mode 时按此挑模式")
     p_dist.add_argument("--mode", choices=["api", "host_agent", "local"],
                         help="覆盖 LLM mode（默认 env / config.yml 推断）")
     p_dist.add_argument("--concurrency", type=int)

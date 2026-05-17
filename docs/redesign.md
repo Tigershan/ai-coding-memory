@@ -17,7 +17,24 @@
 
 ### Changelog
 
-- **v1.4**（本版本，UX hardening pass）：对照"用户第一次下载到第一次 aha moment"动线做整体 review，落地 6 项改进：
+- **v1.5**（本版本，双 mode + 撤回 v1.4 的 "顺手 1 条" 引导）：
+  - 实施 `LocalProvider`（Ollama OpenAI-compatible）。**init / 批量回溯默认走
+    `batch_mode=local`**（如果用户装了 Ollama + qwen3:8b），0 现金 + 0 IDE 配额，
+    单次 30-50s，~200 session 一晚跑完。日常增量保持 `daily_mode=host_agent`。
+  - 拆 `llm.daily_mode` + `llm.batch_mode`（旧 `llm.mode` 兜底兼容）。
+    `core/config.py:resolve_mode(scope)` + `detect_local_available()` 提供运行时判断。
+  - **撤回 v1.4 引入的"每开新 chat 顺手 1 条任务包"机制**（修订 ADR-7 引导）：
+    实测体感不佳——用户每次开 chat 多 ~5s 延迟，且 instructions 里"启动时主动调
+    project_context"在不同 IDE 模型听话度不一。改为：增量场景**仅在用户主动**说
+    "整理今日记忆"时走 skill 批量消化流程。`_build_pending_distill_hint` 简化为
+    纯状态告知（不再注入 agent 行为指令）。
+  - 新增 ADR-13：双 mode 拆分。
+  - distill.py 加 `--mode-hint daily|batch` + 超长 session 兜底（`>28K tokens` 直接
+    标 `task.failed` 防止本地小模型 OOM/截断）。
+  - install.sh Step 5 重写：检测 Ollama 状态，提示用户**手动**装（不自动 brew/pull
+    避免诊断成本），按检测结果自动设 `batch_mode=local|host_agent`。
+
+- **v1.4**（UX hardening pass）：对照"用户第一次下载到第一次 aha moment"动线做整体 review，落地 6 项改进：
   - **阻塞 #1**：`scripts/inject_mcp_config.py` + `install.sh` 加 Claude Code (~/.claude.json) 自动注入分支 —— 之前 Anthropic 用户开箱不可用
   - **阻塞 #2 + 体验 #3**：`install.sh` 末尾换成 ASCII 重启提示框 + 启动咒语 + 自动 pbcopy 到剪贴板（macOS / Linux 兼容），用户重启 IDE 后 Cmd+V 就有清晰第一句话
   - **阻塞 #3**：`get_next_distill_task` docstring 改成"分批 5-10 + 停下问询"模式，明确告知 agent 不要无限循环；配合 user/linter 并行加的 `distill_quota`（每日上限 + 顺延次日）和 `_build_pending_distill_hint`（每次 `project_context` 顺手消化 1 条）
@@ -1181,6 +1198,39 @@ keep_reason 用于审计。
 **不做**：
 - 不做"自动合并/重写"——那需要可靠的 LLM 判定，且容易破坏用户原意
 - 不做"强制阻止冲突写入"——人改优先原则，写入永远成功，只标记可能冲突
+
+### ADR-13：双 mode（daily / batch）拆分（v1.5 新增）
+
+**问题**：单一 `llm.mode` 在以下场景产生矛盾：
+- init 批量回溯（200+ session）：希望 0 配额成本 + 一次跑完 → local 最适合
+- 日常增量（每天少量蒸馏）：希望即用即得 + 高质量 → host_agent 最适合
+- 同一个 mode 字段被两种相反约束拉扯（v1.4 装上 daily_cap=10 + 顺手 1 条机制
+  就是这种妥协的产物）
+
+**决策**：拆 `llm.daily_mode` + `llm.batch_mode`：
+- `daily_mode`（默认 `auto` → host_agent）：lazy_trigger / `ai-memory distill --range today`
+  这种增量场景；优先质量与即时性
+- `batch_mode`（默认 `auto` → 检测 Ollama → local，否则 host_agent）：`ai-memory init`
+  这种回溯场景；优先成本与零干扰
+- 旧的 `llm.mode` 字段仍可读，作为两个 mode 的兜底兼容
+
+`distill.py` 加 `--mode-hint daily|batch`；`init` 总是 `--mode-hint batch`。
+用户仍可 `--mode local|api|host_agent` 手动 override（覆盖 hint）。
+
+**配套撤回**：v1.4 在 `mcp-server/server.py:instructions` 引入的 "**At the start of
+each new chat session, call project_context ONCE before answering**" 引导废弃。
+增量场景不再"顺手 1 条"，纯按需触发（用户喊『整理今日记忆』）。
+
+**理由**：
+- 一字段两场景 → 必有妥协；拆字段后两个场景各跑最适合的引擎
+- v1.4 的"顺手 1 条"实测体感差（每开 chat 多 ~5s 延迟）+ instructions 听话度不一
+- batch_mode=local 把"昂贵的 200 次蒸馏"从"白天的 IDE 配额"挪到"晚上的本地 CPU"，
+  完美利用了 init 的"用户不急"特性
+
+**取舍**：
+- 用户首次 init 需装 Ollama + pull qwen3:8b（5.2GB）—— install.sh 仅检测，不自动装
+- 16GB Mac 跑 qwen3:8b Q4_K_M 是边缘体验（M2/M3 上 25-40 tok/s，单次 30-50s），
+  低于 host_agent 的 3-5s。但 batch 场景这个延迟可接受（一晚跑完）
 
 ---
 

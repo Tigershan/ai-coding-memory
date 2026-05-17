@@ -51,7 +51,8 @@ class LLMCallError(Exception):
 @dataclass
 class LLMConfig:
     mode: str = "auto"                       # auto → 由 detect 决定；可被覆盖为 host_agent | api | local
-    api_provider: str = "dashscope"          # 仅 mode=api：dashscope | openai | 兼容 OpenAI 的其他
+    # ---- api 模式（OpenAI / DashScope / 兼容） ----
+    api_provider: str = "dashscope"
     api_base: str = ""                       # 留空时用 provider 默认
     api_model: str = "qwen-plus"
     api_key: str = ""
@@ -59,6 +60,10 @@ class LLMConfig:
     api_max_retries: int = 2
     api_concurrency: int = 4
     api_daily_budget_yuan: float = 0.0       # 0 = 无限制
+    # ---- local 模式（Ollama 等本地推理） ----
+    local_base: str = ""                     # 留空时用 LOCAL_DEFAULT_BASE
+    local_model: str = ""                    # 留空时用 LOCAL_DEFAULT_MODEL
+    local_timeout_s: int = 0                 # 留空时用 LOCAL_DEFAULT_TIMEOUT_S
 
 
 _DEFAULTS = {
@@ -103,6 +108,10 @@ def load_config_from_env() -> LLMConfig:
             cfg.api_daily_budget_yuan = float(api.get("daily_budget_yuan") or cfg.api_daily_budget_yuan)
             key_env = api.get("key_env") or "DASHSCOPE_API_KEY"
             cfg.api_key = os.environ.get(key_env, "")
+            local = llm.get("local") or {}
+            cfg.local_base = local.get("base") or cfg.local_base
+            cfg.local_model = local.get("model") or cfg.local_model
+            cfg.local_timeout_s = int(local.get("timeout_s") or cfg.local_timeout_s)
     except Exception:
         # 解析失败不阻塞，走 env 兜底
         pass
@@ -265,6 +274,82 @@ class HostAgentProvider(LLMProvider):
         )
 
 
+# ==================== local 模式（Ollama，本地推理） ====================
+
+# Ollama OpenAI-compatible endpoint 默认值
+LOCAL_DEFAULT_BASE = "http://localhost:11434/v1"
+LOCAL_DEFAULT_MODEL = "qwen3:8b"
+LOCAL_DEFAULT_TIMEOUT_S = 120  # 本地 8B 单次蒸馏 30-60s，留 2 倍余量
+
+
+class LocalProvider(LLMProvider):
+    """本地 LLM (Ollama)。复用 OpenAI-compatible HTTP 协议。
+
+    适合 init / 批量回溯场景：0 现金成本、0 IDE 配额，但单次 30-50s。
+    用户主动 `ai-memory distill --mode local` 时也可用于增量。
+    """
+
+    def __init__(self, cfg: LLMConfig):
+        self.cfg = cfg
+        self._base = (cfg.local_base or LOCAL_DEFAULT_BASE).rstrip("/")
+        self._model = cfg.local_model or LOCAL_DEFAULT_MODEL
+        self._timeout = int(cfg.local_timeout_s or LOCAL_DEFAULT_TIMEOUT_S)
+
+    @property
+    def mode(self) -> str:
+        return "local"
+
+    def is_synchronous(self) -> bool:
+        return True
+
+    def run(self, prompt: str, *, system: str = "") -> str:
+        url = self._base + "/chat/completions"
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": [
+                *([{"role": "system", "content": system}] if system else []),
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "stream": False,
+        }
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            # Ollama 不校验，但有 Authorization 兼容某些 OpenAI 客户端期望
+            "Authorization": "Bearer ollama",
+        }
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                raw = resp.read().decode("utf-8")
+        except urllib.error.URLError as e:
+            # 服务没起 / 端口被占等
+            raise LLMCallError(
+                f"本地 Ollama 调用失败：{e}\n"
+                f"  请确认: 1) `ollama serve` 在跑  2) `ollama pull {self._model}` 已完成\n"
+                f"  当前 base_url={self._base}, model={self._model}"
+            ) from e
+        except (OSError, TimeoutError) as e:
+            raise LLMCallError(
+                f"本地 Ollama 超时（>{self._timeout}s）：{e}\n"
+                f"  16GB Mac 上 8B 模型偶有慢请求；可试 qwen3:4b 或加大 timeout"
+            ) from e
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise LLMCallError(f"Ollama 返回非 JSON：{raw[:200]!r}") from e
+
+        choices = payload.get("choices") or []
+        if not choices:
+            raise LLMCallError(f"Ollama 返回无 choices: {raw[:200]}")
+        msg = choices[0].get("message") or {}
+        content = msg.get("content") or ""
+        if not content:
+            raise LLMCallError(f"Ollama 返回空 content: {raw[:200]}")
+        return content
+
+
 # ==================== 工厂 ====================
 
 def make_provider(cfg: LLMConfig | None = None) -> LLMProvider:
@@ -275,7 +360,7 @@ def make_provider(cfg: LLMConfig | None = None) -> LLMProvider:
     if cfg.mode == "host_agent":
         return HostAgentProvider(cfg)
     if cfg.mode == "local":
-        raise NotImplementedError("local 模式（Ollama）远期支持，见 redesign ADR-10")
+        return LocalProvider(cfg)
     raise ValueError(f"未知 LLM mode: {cfg.mode!r}")
 
 

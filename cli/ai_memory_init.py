@@ -194,21 +194,39 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("📭 启发式过滤后无 session 可处理")
         return 2
 
-    # 4. 决定模式
+    # 4. 决定模式：默认走 batch_mode（init 是批量场景）；--mode 可手动 override
     cfg = load_config_from_env()
     if args.mode:
         cfg.mode = args.mode
-    print(f"⚙️  LLM mode: {cfg.mode} (model={cfg.api_model})")
+    else:
+        from core.config import resolve_mode
+        cfg.mode = resolve_mode(scope="batch")
+    if cfg.mode == "local":
+        model_label = cfg.local_model or "qwen3:8b"
+    else:
+        model_label = cfg.api_model
+    print(f"⚙️  LLM mode: {cfg.mode} (model={model_label})")
 
     # 5. Phase B: 估算 + confirm
     print()
-    print("📊 估算（基于 qwen-plus 公开价；其他模型仅作参考）：")
+    if cfg.mode == "api":
+        print("📊 估算（基于 qwen-plus 公开价；其他模型仅作参考）：")
+    else:
+        print("📊 估算：")
     print(f"   LLM 调用数：~{info['est_calls']}")
     if cfg.mode == "api":
         print(f"   预计费用：~¥{info['est_yuan']:.2f}")
         print(f"   预计耗时：~{info['est_minutes']:.1f} 分钟（并发 {cfg.api_concurrency}）")
         if args.budget_max and info["est_yuan"] > args.budget_max:
             print(f"   ⚠️  超过 --budget-max ¥{args.budget_max:.2f}，将在跑满预算后停止")
+    elif cfg.mode == "local":
+        n = info["est_calls"]
+        # 单次 30-50s 估算（M2/M3 上 qwen3:8b 实测）
+        low_min = (n * 30) / 60.0
+        high_min = (n * 50) / 60.0
+        print(f"   预计耗时：~{low_min:.0f}-{high_min:.0f} 分钟（本地 Ollama，串行）")
+        print(f"   ✓ 0 现金成本，0 IDE 配额占用，对话不出本地")
+        print(f"   💡 量大可后台跑：nohup python3 cli/ai_memory.py init --range {args.range} --yes &> /tmp/ai-mem-init.log &")
     else:
         n = info["est_calls"]
         # 默认每日上限（与 distill_quota / config 默认值保持一致）

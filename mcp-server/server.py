@@ -54,6 +54,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from core import agents_md_sync, memory_store as ms, recall_log, task_pack  # noqa: E402
 from core import config as user_config  # noqa: E402
 from core import distill_quota  # noqa: E402
+from core import privacy_filter  # noqa: E402
 from core.memory_store import Memory  # noqa: E402
 from core.project_key import resolve_project_key  # noqa: E402
 
@@ -73,28 +74,27 @@ mcp = FastMCP(
         "(~/.ai-memory/{personal,projects/<git-id>}/). Past coding experiences, "
         "project-specific decisions, debugging history, conventions.\n\n"
 
-        "**At the start of each new chat session, call project_context(workspace=<cwd>) "
-        "ONCE before answering the user's first question.** This loads project "
-        "background, AND when there are pending host_agent distill tasks, the "
-        "response carries a hint asking you to silently consume exactly 1 task "
-        "(get_next_distill_task → run prompt → submit_distill_result) before "
-        "answering the main question. Honor that hint — it's how the user's "
-        "memory library gets built up incrementally without burning their LLM "
-        "quota in bulk. Do NOT call project_context more than once per session.\n\n"
+        "**Call search_memory** whenever the user's question is about something they "
+        "may have encountered before — a project's config, API, decision, bug, "
+        "workflow, or any user-specific term. Even if they don't say 'I remember' "
+        "or 'last time'. search is cheap and fast (<1s); when in doubt, search.\n\n"
 
-        "**During the chat, call search_memory** whenever the user's question is "
-        "about something they may have encountered before — a project's config, "
-        "API, decision, bug, workflow, or any user-specific term. Even if they "
-        "don't say 'I remember' or 'last time'. search is cheap and fast (<1s); "
-        "when in doubt, search.\n\n"
+        "**Call project_context(workspace=...) only on demand** — when the user "
+        "explicitly asks for project background (『这个项目我有什么记下的吗』 / "
+        "『回顾下项目知识』) or when you need a structured summary of a project "
+        "you haven't seen before. Do NOT call it on every chat startup.\n\n"
 
         "**Call remember(text=...) only on explicit request** (user says '记住这个 X' "
         "/ 'save this' / 'remember' etc.). Do NOT preemptively persist memories "
         "without an explicit ask.\n\n"
 
-        "Other tools (read_page, list_topics, forget, pending_distill_count, "
-        "get_next_distill_task, submit_distill_result) are on-demand or driven "
-        "by the project_context hint mechanism above."
+        "**Distill task packs**: pending_distill_count / get_next_distill_task / "
+        "submit_distill_result are for the batch-consumption flow — only triggered "
+        "when the user explicitly asks (『整理今日记忆』 / 『消化任务包』). The "
+        "ai-coding-memory skill orchestrates that flow; you don't need to "
+        "preemptively check or auto-consume on chat startup.\n\n"
+
+        "Other tools (read_page, list_topics, forget) are on-demand."
     ),
 )
 
@@ -155,13 +155,48 @@ def _safe_render_search_results(results: list[dict]) -> str:
         if len(snippet) > MAX_SNIPPET_LEN:
             snippet = snippet[:MAX_SNIPPET_LEN] + "..."
         scope_name = Path(r.get("scope_path", "")).name or "?"
-        tag = "📑 index" if r.get("source") == "index" else "📄 fulltext"
-        lines.append(
+        src_tag = r.get("source")
+        tag = (
+            "🔍 bm25" if src_tag == "bm25"
+            else "📑 index" if src_tag == "index"
+            else "📄 fulltext"
+        )
+        citation = _format_citation(r.get("origin"))
+        block = (
             f"### {i}. [{tag}] `{scope_name}` (score={r['score']})\n"
             f"**path**: `{r['path']}` (line {r['line']})\n\n"
             f"```\n{snippet}\n```"
         )
+        if citation:
+            block += f"\n{citation}"
+        lines.append(block)
     return "\n\n".join(lines)
+
+
+def _format_citation(origin) -> str:
+    """构造 '📎 来自 cursor · 2026-04-25 · session b9f10a..' 形式的溯源行。
+
+    origin 缺失 / 字段不全时返回空串（向后兼容旧 memory）。
+    """
+    if not isinstance(origin, dict) or not origin:
+        return ""
+    parts: list[str] = []
+    ide = origin.get("ide")
+    if isinstance(ide, str) and ide.strip():
+        parts.append(ide.strip())
+    when = (
+        origin.get("distilled_at")
+        or origin.get("remembered_at")
+        or origin.get("created_at")
+    )
+    if isinstance(when, str) and when.strip():
+        parts.append(when.split("T")[0].strip())
+    sid = origin.get("session_id")
+    if isinstance(sid, str) and sid.strip():
+        parts.append(f"session {sid[:6]}..")
+    if not parts:
+        return ""
+    return "📎 来自 " + " · ".join(parts)
 
 
 def _is_path_inside_memory_root(p: Path) -> bool:
@@ -220,6 +255,12 @@ def search_memory(query: str, scope: str = "auto", workspace: str = None) -> str
         top_k=_CFG.top_k,
         snippet_context_lines=_CFG.snippet_context_lines,
         max_results_before_rerank=_CFG.max_results_before_rerank,
+        half_life_days=_CFG.time_decay_half_life_days,
+        decay_floor=_CFG.time_decay_floor,
+        vector_rerank_enabled=_CFG.vector_rerank_enabled,
+        vector_rerank_model=_CFG.vector_rerank_model,
+        vector_rerank_top_n=_CFG.vector_rerank_top_n,
+        vector_rerank_bm25_weight=_CFG.vector_rerank_bm25_weight,
     )
     # 召回反馈日志（不阻塞失败）
     try:
@@ -372,6 +413,10 @@ def remember(text: str, scope: str = "auto", tags: list[str] = None,
     if not text or not text.strip():
         return "❌ remember 失败：text 为空"
 
+    # 写入前脱敏（防止用户粘贴的 secret 落盘到 markdown）
+    text, redact_counts = privacy_filter.redact(text)
+    redacted_n = privacy_filter.total_hits(redact_counts)
+
     # 解析 scope
     effective_scope = scope
     project_key = None
@@ -411,6 +456,7 @@ def remember(text: str, scope: str = "auto", tags: list[str] = None,
     if value not in ("high", "medium", "low"):
         value = "medium"
 
+    from datetime import datetime
     mem = Memory(
         id=ms.make_id(title),
         scope=effective_scope,
@@ -420,57 +466,52 @@ def remember(text: str, scope: str = "auto", tags: list[str] = None,
         source="manual",
         value=value,
         tags=[t for t in (tags or []) if isinstance(t, str)][:6],
-        origin={"ide": "mcp-remember", "workspace": workspace or ""},
+        origin={
+            "ide": "mcp-remember",
+            "workspace": workspace or "",
+            "remembered_at": datetime.now().isoformat(timespec="seconds"),
+        },
     )
     try:
         path = ms.save(mem)
     except Exception as e:
         return f"❌ remember 落盘失败：{e}"
 
-    return (
+    msg = (
         f"✓ 已记住：`{mem.id}`\n"
         f"  scope=`{mem.scope}`{', project_key=`' + project_key + '`' if project_key else ''}\n"
         f"  value=`{mem.value}` tags=`{mem.tags}`\n"
         f"  📄 文件：`{path}`\n"
         f"  💡 用户可随时 `$EDITOR` 打开此文件修改，下次 pipeline 不会覆盖（人改优先）。"
     )
+    if redacted_n > 0:
+        kinds = ", ".join(sorted(redact_counts.keys()))
+        msg += (
+            f"\n  ⚠️ 已自动脱敏 {redacted_n} 处疑似 secret（{kinds}）；"
+            "落盘内容已替换为 <REDACTED:类型>。"
+        )
+    return msg
 
 
 def _build_pending_distill_hint() -> str:
-    """host_agent 模式 + .pending 非空 + 当日额度未用尽时，给宿主 Agent 静默消化指令。
+    """如有待蒸馏任务包，在 project_context 返回末尾追加一行**纯状态告知**。
 
-    返回空字符串表示不追加（非 host_agent / 没有 pending / 当日额度用尽 / 出错）。
-    注意：本提示只追加到 project_context 的返回字符串，不写进 AGENTS.md。
+    本提示**不再注入 agent 行为指令**——之前的"顺手 1 条"机制经实测体感欠佳
+    （v1.4 → v1.5 撤回，见 redesign.md）。现在仅告诉用户/agent 当前状态，
+    用户主动喊『整理今日记忆』时再走 skill 的批量消化流程。
+
+    返回空字符串表示不追加（无 pending / 出错）。
     """
     try:
-        mode = user_config.get_value("llm.mode") or "host_agent"
-        if mode != "host_agent":
-            return ""
-        pending = task_pack.list_pending(include_in_progress=False)
-        n = len(pending)
+        n = task_pack.count_pending()
         if n == 0:
             return ""
-        allowed, used, cap = distill_quota.can_take()
-        if not allowed:
-            # 当日额度已用尽：不再唆使 Agent 跑，但留一行明示用户"明天继续"
-            return (
-                "\n\n---\n\n"
-                f"📥 _后台 memory 消化：今日额度已用尽（{used}/{cap}），剩 {n} 条任务包将顺延到明天。_\n"
-                f"_想突破今日上限请喊『继续整理』走批量消化流程。_"
-            )
     except Exception:
         return ""
 
     return (
         "\n\n---\n\n"
-        f"📥 **后台 memory 消化（host_agent · 剩 {n} 条待整理 · 今日已消化 {used}/{cap}）**\n\n"
-        "在回答用户主问题**之前**，请按如下顺序静默跑 1 条任务包（仅 1 条，避免抢上下文）：\n"
-        "1. 调 `get_next_distill_task()` 拿到 `task_id` + `prompt`\n"
-        "2. 用你（宿主 Agent）自己的 LLM 跑这个 prompt，得到 YAML 输出\n"
-        "3. 调 `submit_distill_result(task_id, result_yaml)` 提交\n"
-        f"4. 在你给用户的最终回答**最前面**加一行：`_💾 已消化 1 条 memory（今日 {used + 1}/{cap}）_`\n\n"
-        "_失败可静默忽略（写日志即可，不打扰用户）。"
-        "用户如果显式说「整理今日记忆」请走 ai-coding-memory skill 的批量消化流程，不要走本提示。_"
+        f"📥 _有 {n} 个待整理的对话任务包。说『整理今日记忆』可让 agent 走批量消化流程。_"
     )
 
 

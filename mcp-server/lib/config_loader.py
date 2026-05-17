@@ -37,6 +37,14 @@ _DEFAULTS = {
     "max_results_before_rerank": 200,
     "max_page_bytes": 60_000,
     "max_snippet_len": 600,
+    # 时间衰减（仅作用于 source ∈ {auto, bootstrap}）
+    "time_decay_half_life_days": 90,
+    "time_decay_floor": 0.5,
+    # 向量重排（默认关；需 pip install '.[vector]'）
+    "vector_rerank_enabled": False,
+    "vector_rerank_model": "BAAI/bge-small-en-v1.5",
+    "vector_rerank_top_n": 50,
+    "vector_rerank_bm25_weight": 0.3,
 }
 
 
@@ -49,6 +57,12 @@ class Config:
     max_results_before_rerank: int
     max_page_bytes: int
     max_snippet_len: int
+    time_decay_half_life_days: int
+    time_decay_floor: float
+    vector_rerank_enabled: bool
+    vector_rerank_model: str
+    vector_rerank_top_n: int
+    vector_rerank_bm25_weight: float
     sources: list[str]    # 已加载的配置文件路径（self-check 用）
     warnings: list[str]   # 加载过程中的告警
 
@@ -84,6 +98,31 @@ def _coerce_int(val, fallback: int) -> int:
         return int(val)
     except (TypeError, ValueError):
         return fallback
+
+
+def _coerce_float(val, fallback: float) -> float:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _coerce_bool(val, fallback: bool) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+    return fallback
+
+
+def _coerce_str(val, fallback: str) -> str:
+    if isinstance(val, str) and val.strip():
+        return val
+    return fallback
 
 
 def _project_default_yml() -> Path:
@@ -143,6 +182,26 @@ def load_config(force_reload: bool = False) -> Config:
         ),
         max_snippet_len=_coerce_int(
             merged.get("max_snippet_len"), _DEFAULTS["max_snippet_len"]
+        ),
+        time_decay_half_life_days=_coerce_int(
+            merged.get("time_decay_half_life_days"),
+            _DEFAULTS["time_decay_half_life_days"],
+        ),
+        time_decay_floor=_coerce_float(
+            merged.get("time_decay_floor"), _DEFAULTS["time_decay_floor"]
+        ),
+        vector_rerank_enabled=_coerce_bool(
+            merged.get("vector_rerank_enabled"), _DEFAULTS["vector_rerank_enabled"]
+        ),
+        vector_rerank_model=_coerce_str(
+            merged.get("vector_rerank_model"), _DEFAULTS["vector_rerank_model"]
+        ),
+        vector_rerank_top_n=_coerce_int(
+            merged.get("vector_rerank_top_n"), _DEFAULTS["vector_rerank_top_n"]
+        ),
+        vector_rerank_bm25_weight=_coerce_float(
+            merged.get("vector_rerank_bm25_weight"),
+            _DEFAULTS["vector_rerank_bm25_weight"],
         ),
         sources=sources,
         warnings=warnings,

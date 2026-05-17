@@ -213,7 +213,7 @@ else
     fi
 fi
 
-# ---- Step 5: LLM mode 询问（redesign §6.0 / ADR-10 C 方案） ----
+# ---- Step 5: LLM mode 配置（双 mode：daily 增量 + batch 批量回溯） ----
 echo ""
 info "⚙️  Step 5/6: LLM mode 配置"
 
@@ -226,42 +226,82 @@ for env_name in OPENAI_API_KEY DASHSCOPE_API_KEY AI_MEMORY_LLM_API_KEY; do
     fi
 done
 
+# 检测 Ollama 可用性 + qwen3:8b 是否已 pull
+OLLAMA_STATE=$(python3 -c "
+from core.config import detect_local_available
+import json, sys; sys.path.insert(0, '${PROJECT_ROOT}')
+from core.config import detect_local_available
+r = detect_local_available()
+if r.get('model_ready'):
+    print('ready')
+elif r.get('ollama'):
+    print('no_model')
+else:
+    print('no_ollama')
+" 2>/dev/null || echo "no_ollama")
+
+echo ""
+echo "  ── 日常增量场景（每次主动 distill 单天 / search 召回） ──"
+echo "    默认 host_agent（用 IDE 自带的 LLM；零成本零配置）"
 if [ -n "$DETECTED_KEY" ]; then
-    echo "    检测到环境变量 ${DETECTED_KEY}（值已忽略）"
+    echo "    可选 api（检测到 ${DETECTED_KEY}）：自动后台跑，但消耗 API 配额"
 fi
-
-echo "    LLM 提供两档来源："
-echo "      1) host_agent (推荐, 零成本, 零配置)"
-echo "         IDE 自己的 AI 用它的 LLM 跑蒸馏 (说『整理今日记忆』触发)"
-echo "      2) api (自动后台运行, 消耗 ${DETECTED_KEY:-API 配额})"
-echo "         lazy trigger 用 OpenAI-compatible API 后台静默跑"
-
-if [ "${INSTALL_NONINTERACTIVE:-0}" = "1" ]; then
-    LLM_CHOICE=1
-    info "    NONINTERACTIVE: 默认选 host_agent"
-else
-    if [ -n "$DETECTED_KEY" ]; then
-        printf "    选择 [1=host_agent / 2=api]: "
-    else
-        printf "    选择 [1=host_agent / 2=api(需先 export 一个 API key)]: "
-    fi
-    read -r LLM_CHOICE
-    LLM_CHOICE="${LLM_CHOICE:-1}"
-fi
-
-case "$LLM_CHOICE" in
-    2)
-        if [ -z "$DETECTED_KEY" ]; then
-            warn "    没检测到 API key 环境变量，仍然写入 api 模式；用前请 export DASHSCOPE_API_KEY 或 OPENAI_API_KEY"
-        fi
-        python3 "${PROJECT_ROOT}/cli/ai_memory.py" config set llm.mode api >/dev/null 2>&1
-        info "    ✓ 已写入 llm.mode=api"
+echo ""
+echo "  ── 批量回溯场景（init last-7d / last-30d / all）──"
+case "$OLLAMA_STATE" in
+    ready)
+        echo "    ✓ Ollama 服务已运行 + qwen3:8b 已就绪"
+        echo "    → batch_mode 自动设为 local（零现金 + 零 IDE 配额，~30-50s/条）"
+        BATCH_MODE_DEFAULT="local"
+        ;;
+    no_model)
+        echo "    ⚠️  Ollama 已装但 qwen3:8b 未 pull"
+        echo "       要启用 local：ollama pull qwen3:8b   （5.2GB，~2-5 分钟）"
+        echo "       现在 batch_mode 暂设为 host_agent（用 IDE LLM，但量大时慢）"
+        BATCH_MODE_DEFAULT="host_agent"
         ;;
     *)
-        python3 "${PROJECT_ROOT}/cli/ai_memory.py" config set llm.mode host_agent >/dev/null 2>&1
-        info "    ✓ 已写入 llm.mode=host_agent（零成本）"
+        echo "    ⚠️  未检测到 Ollama 服务"
+        echo "       要启用 local（推荐 batch 场景，零成本）："
+        echo "         brew install ollama && ollama serve &"
+        echo "         ollama pull qwen3:8b   （5.2GB，~2-5 分钟）"
+        echo "       装好后跑：ai-memory config set llm.batch_mode local"
+        echo "       现在 batch_mode 暂设为 host_agent（fallback，受 IDE 配额限制）"
+        BATCH_MODE_DEFAULT="host_agent"
         ;;
 esac
+echo ""
+
+if [ "${INSTALL_NONINTERACTIVE:-0}" = "1" ]; then
+    DAILY_CHOICE=1
+    info "    NONINTERACTIVE: daily_mode=host_agent, batch_mode=$BATCH_MODE_DEFAULT"
+else
+    if [ -n "$DETECTED_KEY" ]; then
+        printf "    daily_mode 选择 [1=host_agent (默认) / 2=api]: "
+    else
+        printf "    daily_mode 选择 [1=host_agent (默认) / 2=api(需先 export 一个 API key)]: "
+    fi
+    read -r DAILY_CHOICE
+    DAILY_CHOICE="${DAILY_CHOICE:-1}"
+fi
+
+case "$DAILY_CHOICE" in
+    2)
+        if [ -z "$DETECTED_KEY" ]; then
+            warn "    没检测到 API key，仍写入 daily_mode=api；用前请 export DASHSCOPE_API_KEY / OPENAI_API_KEY"
+        fi
+        python3 "${PROJECT_ROOT}/cli/ai_memory.py" config set llm.daily_mode api >/dev/null 2>&1
+        info "    ✓ daily_mode=api"
+        ;;
+    *)
+        python3 "${PROJECT_ROOT}/cli/ai_memory.py" config set llm.daily_mode host_agent >/dev/null 2>&1
+        info "    ✓ daily_mode=host_agent"
+        ;;
+esac
+
+# batch_mode 不询问，按检测自动设
+python3 "${PROJECT_ROOT}/cli/ai_memory.py" config set llm.batch_mode "$BATCH_MODE_DEFAULT" >/dev/null 2>&1
+info "    ✓ batch_mode=$BATCH_MODE_DEFAULT"
 
 # ---- Step 6: 首次 init 询问（redesign §6.5.4） ----
 echo ""

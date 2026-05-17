@@ -327,6 +327,15 @@ def _topic_to_memory(topic: dict, session: dict, project_key: str | None):
     if not isinstance(tags, list):
         tags = []
     tags = [str(t) for t in tags][:6]
+    origin = {
+        "ide": session.get("ide"),
+        "session_id": session.get("sessionId"),
+        "workspace": session.get("workspace"),
+        "distilled_at": datetime.now().date().isoformat(),
+    }
+    msg_range = topic.get("source_msg_range")
+    if isinstance(msg_range, list) and len(msg_range) == 2:
+        origin["msg_range"] = msg_range
     return Memory(
         id=ms.make_id(title),
         scope=scope,
@@ -336,11 +345,7 @@ def _topic_to_memory(topic: dict, session: dict, project_key: str | None):
         source="auto",
         value=value,
         tags=tags,
-        origin={
-            "ide": session.get("ide"),
-            "session_id": session.get("sessionId"),
-            "workspace": session.get("workspace"),
-        },
+        origin=origin,
         extra={
             "summary": topic.get("summary") or "",
             "keep_reason": topic.get("keep_reason") or "",

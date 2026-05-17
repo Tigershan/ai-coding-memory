@@ -35,7 +35,7 @@ description: |
 
 ### 角色 B：批量消化器（用户说"整理今日记忆"等）
 
-目标：分批消化 `.pending/` 里的任务包，每批 5-10 个，跑完问"继续吗"。
+目标：批量消化 `.pending/` 里的任务包。**默认走 batch_mode**（host_agent 时按 ~10/批 + 询问继续；local 时可一次跑完不分批）。
 
 ---
 
@@ -121,24 +121,38 @@ mcp__ai-coding-memory__pending_distill_count
 - "暂无待整理任务" → 直接告诉用户"没有任务包待整理"，结束。
 - "📥 有 N 个" → 进入循环。
 
-### B.1 分批循环（**每批 5-10 个，不要一次到底**）
+### B.1 循环消化（**节奏取决于 batch_mode**）
 
-⚠️ **绝对约束**：
-- **不要** `while pending > 0` 无限循环。一次跑光会爆 chat 上下文 + 烧光 IDE LLM 配额，subagent 实测 35/66 时被 quota 砍掉。
-- 默认每批 **5 个**（除非用户说"一次跑 10 个" / "一次跑 20 个"）。
-- 一批跑完**停下问用户**："已消化 N 条，还剩 M。继续吗？"
+先确认当前 `llm.batch_mode`（用户在 install 时已选；CLI: `ai-memory config get llm.batch_mode`）：
 
-每批的循环步骤：
+- **batch_mode=local**（推荐，Ollama 本地推理）：单次 30-50s，0 现金 / 0 IDE 配额。
+  可一次性跑到 `pending=0`，每 10 条汇报一次进度即可（不必停下询问）。
+  N 条耗时 ≈ N × 40s；20 条 ≈ 13 分钟；可后台 nohup 跑。
+- **batch_mode=host_agent**（fallback）：单次 3-5s，但占用宿主 IDE 实时 LLM 配额。
+  必须分批：默认每 10 条停下问"继续吗？还剩 M"，避免爆 chat 上下文 + 配额。
+- **batch_mode=api**（用户配了 key）：3-10s/条 + 真金白银。按用户偏好走（默认每 10 条问一次）。
+
+每次循环的核心步骤：
 
 ```
-for _ in range(BATCH_SIZE):
+batch_mode == "local":
+    BATCH_SIZE = pending_count  (一次跑完，每 10 条 echo 进度即可)
+batch_mode == "host_agent" / "api":
+    BATCH_SIZE = 10  (跑完询问"继续吗")
+
+for i in range(BATCH_SIZE):
     1. resp = mcp__ai-coding-memory__get_next_distill_task()
-       若 resp 含 "暂无待整理任务" 或 "今日额度已用尽" → break
+       若 resp 含 "暂无待整理任务" → break
+       host_agent 模式下若 resp 含 "今日额度已用尽" → break（不要传 force=True）
        否则解析出 TASK_ID 和 PROMPT_START..PROMPT_END 之间的 prompt
 
-    2. 用你（宿主 agent）自己的 LLM 跑这段 prompt，产出 YAML 结果
-       YAML schema 见 prompt 末尾，外层只允许一个 `topics:` 数组。
-       要点：
+    2. 用 batch_mode 对应的 LLM 跑这段 prompt，产出 YAML 结果
+       - batch_mode=local：宿主 agent 通过 MCP 调用本地 Ollama；但当前 skill 设计是
+         "agent 自跑 prompt"——也就是说，仍然由你（agent，使用你的 LLM）跑。
+         若用户希望走真正的本地 Ollama，建议直接 `ai-memory init`/`distill`（命令行
+         调 LocalProvider，绕过 skill 编排）。
+       - batch_mode=host_agent：你（agent）自跑（即 IDE 自带 LLM）
+       YAML schema：外层只允许一个 `topics:` 数组。要点：
          - body 用 `body: |` 块字符串
          - scope=project 仅当 prompt 中 project_key 不为 null
          - 没价值的 topic 写 `should_keep: false`（会被丢弃，不入库）
@@ -148,7 +162,7 @@ for _ in range(BATCH_SIZE):
        - dropped 非空 = LLM 自判低价值丢弃（不入库）
        - errors 非空 = YAML 格式问题 → 任务包已自动转为 .task.failed，不要重试本批
 
-    4. 把这条结果记下来（id / title / value），稍后汇总给用户
+    4. 累计 (id / title / value)，每 10 条 echo 一次进度："已消化 N/total"
 ```
 
 ### B.2 汇总报告

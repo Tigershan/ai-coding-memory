@@ -41,6 +41,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core import frontmatter as fm                              # noqa: E402
 from core import memory_store as ms                             # noqa: E402
+from core import privacy_filter                                 # noqa: E402
 from core.llm_provider import (                                 # noqa: E402
     LLMCallError,
     PendingTaskError,
@@ -106,16 +107,25 @@ def append_filtered_log(date_key: str, session: dict, reason: str) -> None:
 # ==================== prompt 渲染 ====================
 
 def render_prompt(session: dict, project_key: str | None) -> str:
-    """把 session 内容填进 prompt 模板"""
+    """把 session 内容填进 prompt 模板（写入前对每条 message 做 secret 脱敏）"""
     template = PROMPT_FILE.read_text(encoding="utf-8")
     convo_lines = []
+    redact_total: dict[str, int] = {}
     for i, m in enumerate(session.get("conversation") or []):
         role = m.get("role", "?")
         content = m.get("content", "")
         if not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=False)
+        content, hits = privacy_filter.redact(content)
+        for k, v in hits.items():
+            redact_total[k] = redact_total.get(k, 0) + v
         convo_lines.append(f"[{i}] {role}: {content}")
     convo_text = "\n\n".join(convo_lines)
+    if redact_total:
+        try:
+            _append_redact_log(session, redact_total)
+        except Exception:
+            pass
 
     return (
         template
@@ -125,6 +135,22 @@ def render_prompt(session: dict, project_key: str | None) -> str:
         .replace("{project_key}", project_key or "null")
         .replace("{conversation}", convo_text)
     )
+
+
+def _append_redact_log(session: dict, counts: dict[str, int]) -> None:
+    """记录每个 session 的脱敏统计（不含原文）。供审计、不打扰用户。"""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    date_key = datetime.now().date().isoformat()
+    log_file = LOG_DIR / f"redact-{date_key}.jsonl"
+    record = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "session_id": session.get("sessionId"),
+        "ide": session.get("ide"),
+        "counts": counts,
+        "total": sum(counts.values()),
+    }
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 # ==================== LLM 输出解析 ====================
@@ -189,6 +215,19 @@ def distill_one_session(
         return {"session_id": sid, "kept": 0, "dropped": 0, "skipped_reason": "dry-run"}
 
     prompt = render_prompt(session, project_key)
+    # 超长 session 兜底：粗估 tokens（chars/4），超过 28K 跳过避免 OOM / 截断垃圾输出
+    # qwen3 / qwen2.5 系列 32K context；GPT-4 / Claude 即使更大也不该塞这种巨长 session
+    MAX_INPUT_TOKENS = 28000
+    est_tokens = len(prompt) // 4
+    if est_tokens > MAX_INPUT_TOKENS:
+        if verbose:
+            print(f"  [{sid[:8]}] SKIPPED: prompt ~{est_tokens} tokens > {MAX_INPUT_TOKENS} cap",
+                  file=sys.stderr)
+        return {
+            "session_id": sid, "kept": 0, "dropped": 0,
+            "error": f"input too large (~{est_tokens} tokens, cap {MAX_INPUT_TOKENS})",
+        }
+
     # host_agent 需要预先注入 session 上下文给任务包
     if hasattr(provider, "set_session_context"):
         try:
@@ -330,9 +369,17 @@ def cmd_distill(args: argparse.Namespace) -> int:
     cfg = load_config_from_env()
     if args.mode:
         cfg.mode = args.mode
+    elif getattr(args, "mode_hint", None):
+        # 没显式 --mode，按 hint 走 daily_mode / batch_mode
+        from core.config import resolve_mode
+        cfg.mode = resolve_mode(scope=args.mode_hint)
     if args.concurrency:
         cfg.api_concurrency = args.concurrency
-    print(f"⚙️  LLM mode: {cfg.mode} (model={cfg.api_model}, concurrency={cfg.api_concurrency})")
+    if cfg.mode == "local":
+        model_label = cfg.local_model or "qwen3:8b"
+        print(f"⚙️  LLM mode: local (model={model_label}, base={cfg.local_base or 'http://localhost:11434/v1'})")
+    else:
+        print(f"⚙️  LLM mode: {cfg.mode} (model={cfg.api_model}, concurrency={cfg.api_concurrency})")
 
     try:
         provider = make_provider(cfg)
@@ -428,6 +475,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="today | yesterday | YYYY-MM-DD")
     p.add_argument("--mode", choices=["api", "host_agent", "local"],
                    help="覆盖 LLM mode（默认从 env / config.yml 推断）")
+    p.add_argument("--mode-hint", choices=["daily", "batch"], dest="mode_hint",
+                   help="场景提示：daily=增量（lazy_trigger / 主动当日蒸馏），"
+                        "batch=批量（init / 历史回溯）。无 --mode 时按此挑 daily_mode / batch_mode；默认 daily")
     p.add_argument("--concurrency", type=int,
                    help="并发 LLM 调用数（仅 api 模式有意义）")
     p.add_argument("--dry-run", action="store_true",

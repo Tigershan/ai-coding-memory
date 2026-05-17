@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ln -s ../../docs/redesign.md design.md)",
+      "Skill(update-config)",
+      "Bash(chmod +x /Users/tiger/skills/ai-coding-memory/cli/ai_memory.py)",
+      "Bash(chmod +x distill/scripts/distill.py)",
+      "mcp__ai-coding-memory__pending_distill_count",
+      "mcp__ai-coding-memory__search_memory",
+      "mcp__ai-coding-memory__list_topics",
+      "mcp__ai-coding-memory__project_context",
+      "mcp__ai-coding-memory__read_page",
+      "mcp__ai-coding-memory__get_next_distill_task",
+      "mcp__ai-coding-memory__submit_distill_result",
+      "Bash(xargs -I {} basename {})",
+      "Read(//Users/tiger/.ai-memory/.cold/**)",
+      "Bash(bash -n /Users/tiger/skills/ai-coding-memory/install.sh)",
+      "WebSearch",
+      "WebFetch(domain:www.anthropic.com)",
+      "Bash(INSTALL_NONINTERACTIVE=1 bash /Users/tiger/skills/ai-coding-memory/install.sh)",
+      "mcp__ai-coding-memory__remember",
+      "Bash(gh repo *)",
+      "Bash(gh api *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:ollama.com)",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(/Users/tiger/.copaw/venv/bin/pip install *)",
+      "Bash(/Users/tiger/.copaw/venv/bin/python -m ensurepip)",
+      "Bash(/Users/tiger/.copaw/venv/bin/python -m pip install rank_bm25 pytest)",
+      "Bash(/Users/tiger/.copaw/venv/bin/python -m pytest tests/ -v)",
+      "Bash(/Users/tiger/.copaw/venv/bin/python *)"
+    ]
+  }
+}
