@@ -149,6 +149,7 @@ alias ai-memory="python3 ~/ai-coding-memory/cli/ai_memory.py"
 - 所有 memory 数据**仅存本地** `~/.ai-memory/`
 - `host_agent` 模式：LLM 调用走宿主 IDE 自己的 LLM 通道（你怎么用 IDE 就怎么用，不额外向第三方上行）
 - `api` 模式：调用你配置的 OpenAI-compatible API（DashScope / OpenAI / 等），相关对话片段会发往该 API
+- **写入前脱敏**（v1.6）：distill 与 `remember` 落盘前对 9 类 secret（AWS / OpenAI / Slack / GitHub token / JWT / JDBC password / RSA 私钥块 / 通用 `password=...`）做正则替换为 `<REDACTED:类型>`；命中数写入 `~/.ai-memory/logs/redact-<date>.jsonl`（**不含原文**，仅审计计数）
 - `domain-mapping.yml` 这类用户私有配置不入 git
 
 ---
@@ -170,6 +171,7 @@ alias ai-memory="python3 ~/ai-coding-memory/cli/ai_memory.py"
 - ✅ P0–P5 已实施（commits `65f3359` ~ `1124d1b`）
 - ✅ 多轮 bug fix（frontmatter block scalar / read_page security / submit silent loss / 等）
 - ✅ 在用户真实数据 last-7d 上验证全链路（67 任务包 → 27 条 memory + 12 条丢弃）
+- ✅ P7 完成（v1.6，commits `54df105` + `df57123`）：借鉴 agentmemory 的 5 项升级——BM25 + CJK bigram 替代 grep、时间衰减软重排、可选本地向量重排（`pip install '.[vector]'`）、写入前 9 类 secret 脱敏、frontmatter origin 扩展 + 召回 citation 渲染。详见 `docs/redesign.md` ADR-14
 - 🔬 P6 (reflect) 已有设计草案，等 P5 跑 1-2 月数据再决定是否上
 
 ---

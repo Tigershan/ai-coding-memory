@@ -283,15 +283,25 @@ LOCAL_DEFAULT_TIMEOUT_S = 120  # 本地 8B 单次蒸馏 30-60s，留 2 倍余量
 
 
 class LocalProvider(LLMProvider):
-    """本地 LLM (Ollama)。复用 OpenAI-compatible HTTP 协议。
+    """本地 LLM (Ollama)。用 Ollama native /api/chat（含 think:false 关 reasoning）。
 
-    适合 init / 批量回溯场景：0 现金成本、0 IDE 配额，但单次 30-50s。
-    用户主动 `ai-memory distill --mode local` 时也可用于增量。
+    为什么用 native 而非 OpenAI-compatible /v1/chat/completions：
+        qwen3 / qwen3.5 等系列默认开 reasoning mode，把 token budget 都耗在
+        thinking chain 里（OpenAI endpoint 把 thinking 当成 content 一部分但
+        外露到 message.content 时会被截掉，结果 content="finish_reason=length"）。
+        Ollama native /api/chat 接受 think:false 直接禁用，输出立即落到
+        message.content。OpenAI endpoint 当前不支持 think 参数。
+
+    适合 init / 批量回溯场景：0 现金 / 0 IDE 配额。
     """
 
     def __init__(self, cfg: LLMConfig):
         self.cfg = cfg
-        self._base = (cfg.local_base or LOCAL_DEFAULT_BASE).rstrip("/")
+        # base 形如 http://localhost:11434/v1，但我们要打 /api/chat —— 统一去掉 /v1
+        base = (cfg.local_base or LOCAL_DEFAULT_BASE).rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        self._base = base
         self._model = cfg.local_model or LOCAL_DEFAULT_MODEL
         self._timeout = int(cfg.local_timeout_s or LOCAL_DEFAULT_TIMEOUT_S)
 
@@ -303,50 +313,50 @@ class LocalProvider(LLMProvider):
         return True
 
     def run(self, prompt: str, *, system: str = "") -> str:
-        url = self._base + "/chat/completions"
+        url = self._base + "/api/chat"
         body: dict[str, Any] = {
             "model": self._model,
             "messages": [
                 *([{"role": "system", "content": system}] if system else []),
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.2,
             "stream": False,
+            "think": False,  # 关 reasoning chain；distill 不需要中间思考过程
+            "options": {
+                "temperature": 0.2,
+                "num_predict": 4096,  # 蒸馏 YAML 输出上限（足够 N 个 topic）
+            },
         }
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            # Ollama 不校验，但有 Authorization 兼容某些 OpenAI 客户端期望
-            "Authorization": "Bearer ollama",
-        }
+        headers = {"Content-Type": "application/json"}
         try:
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 raw = resp.read().decode("utf-8")
         except urllib.error.URLError as e:
-            # 服务没起 / 端口被占等
             raise LLMCallError(
                 f"本地 Ollama 调用失败：{e}\n"
                 f"  请确认: 1) `ollama serve` 在跑  2) `ollama pull {self._model}` 已完成\n"
-                f"  当前 base_url={self._base}, model={self._model}"
+                f"  当前 base={self._base}, model={self._model}"
             ) from e
         except (OSError, TimeoutError) as e:
             raise LLMCallError(
                 f"本地 Ollama 超时（>{self._timeout}s）：{e}\n"
-                f"  16GB Mac 上 8B 模型偶有慢请求；可试 qwen3:4b 或加大 timeout"
+                f"  长 prompt + 大模型本来就慢；可加大 timeout 或换更小模型"
             ) from e
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as e:
             raise LLMCallError(f"Ollama 返回非 JSON：{raw[:200]!r}") from e
 
-        choices = payload.get("choices") or []
-        if not choices:
-            raise LLMCallError(f"Ollama 返回无 choices: {raw[:200]}")
-        msg = choices[0].get("message") or {}
+        # /api/chat 返回结构：{"message": {"role": "assistant", "content": "..."}, "done": true, ...}
+        msg = payload.get("message") or {}
         content = msg.get("content") or ""
         if not content:
-            raise LLMCallError(f"Ollama 返回空 content: {raw[:200]}")
+            raise LLMCallError(
+                f"Ollama 返回空 content（done_reason={payload.get('done_reason')}, "
+                f"eval_count={payload.get('eval_count')}): {raw[:200]}"
+            )
         return content
 
 
