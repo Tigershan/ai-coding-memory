@@ -541,6 +541,19 @@ def project_context(workspace: str) -> str:
         base = f"_workspace `{workspace}` 不在 git 仓库中，无 project 记忆_"
         return _render_empty_lib_hints(base) + _build_pending_distill_hint()
     project_key = info["key"]
+
+    # 编译层触发：检测到 stale 且有同步 LLM 可用时，先重编译再取摘要
+    from core.compiler import is_stale, compile_project
+    if is_stale(project_key):
+        try:
+            from core.llm_provider import load_config_from_env, make_provider
+            cfg = load_config_from_env()
+            provider = make_provider(cfg)
+            if provider.is_synchronous():
+                compile_project(project_key, llm_provider=provider)
+        except Exception:
+            pass
+
     summary = agents_md_sync.build_summary(project_key)
     if not summary:
         base = f"_project `{project_key}` 暂无 memory_"
