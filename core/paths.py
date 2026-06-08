@@ -67,3 +67,14 @@ def ensure_data_dirs() -> None:
         WIKI_ROOT, RAW_SESSIONS_DIR, CONFIG_DIR, LOG_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def compiled_dir(project_key: str) -> Path:
+    """返回项目编译层目录 projects/<dir_name>/_compiled/"""
+    from .project_key import _to_dir_name
+    return PROJECTS_DIR / _to_dir_name(project_key) / "_compiled"
+
+
+def stale_marker_path(project_key: str) -> Path:
+    """返回编译层 stale 标记文件路径"""
+    return compiled_dir(project_key) / ".stale"
