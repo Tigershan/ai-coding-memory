@@ -35,6 +35,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from core.frontmatter import parse as parse_fm  # noqa: E402
 from core.paths import PERSONAL_DIR, PROJECTS_DIR  # noqa: E402
 from core.project_key import _to_dir_name  # noqa: E402
+from core.recall_log import get_recall_counts  # noqa: E402
 
 from . import bm25_index  # noqa: E402
 from . import vector_rerank  # noqa: E402
@@ -58,6 +59,11 @@ SOURCE_WEIGHTS = {"manual": 1.3, "edited": 1.2, "auto": 1.0, "bootstrap": 1.0}
 
 # 不衰减的 source（人明确动作过的笔记）
 NON_DECAY_SOURCES = frozenset({"manual", "edited"})
+
+# recall boost 参数
+RECALL_BOOST_PER_HIT = 0.1   # 每次召回 +10%
+RECALL_BOOST_CAP = 1.5       # 上限 +50%
+RECALL_BOOST_DAYS = 30        # 统计窗口
 
 
 def search_with_scope(
@@ -196,7 +202,7 @@ def _decay_weight(
     half_life_days: int,
     floor: float,
 ) -> float:
-    """source ∈ {manual, edited} 不衰减；其它按半衰期衰减到 floor。"""
+    """source ∈ {manual, edited} 不衰减；其它按半衰期衰减，高频召回获得正反馈加成。"""
     src = fm.get("source", "auto")
     if src in NON_DECAY_SOURCES:
         return 1.0
@@ -209,8 +215,15 @@ def _decay_weight(
         except OSError:
             return 1.0
     age_days = max(0.0, (now - float(mtime)) / 86400.0)
-    w = 0.5 ** (age_days / float(half_life_days))
-    return max(float(floor), w)
+    age_decay = 0.5 ** (age_days / float(half_life_days))
+
+    # recall boost: 最近 30 天被命中越多，衰减越慢
+    memory_id = fm.get("id", "")
+    recall_counts = get_recall_counts(days=RECALL_BOOST_DAYS)
+    recall_count = recall_counts.get(memory_id, 0)
+    recall_boost = min(RECALL_BOOST_CAP, 1.0 + recall_count * RECALL_BOOST_PER_HIT)
+
+    return max(float(floor), age_decay * recall_boost)
 
 
 # ==================== 跨项目过滤 ====================

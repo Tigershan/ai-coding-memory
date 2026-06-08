@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -108,6 +109,46 @@ def collect_stats(since_days: int = 30) -> dict:
         "top_read_ids": sorted(read_counts.items(), key=lambda x: -x[1])[:10],
         "active_ids": set(hit_counts) | set(read_counts),
     }
+
+
+# ==================== 召回频率计数（searcher 用于 recall boost） ====================
+
+_recall_counts_cache: dict | None = None
+_recall_counts_ts: float = 0.0
+_RECALL_COUNTS_TTL_S = 60.0  # 1 分钟 TTL
+
+
+def get_recall_counts(days: int = 30, *, force_refresh: bool = False) -> dict[str, int]:
+    """统计最近 N 天每个 memory ID 的召回次数（search hit + read）。
+
+    结果带进程级 TTL 缓存（60s），避免每次搜索都扫日志。
+    read 事件权重 ×2（用户主动打开 = 更强的价值信号）。
+
+    返回 {memory_id: weighted_count}。
+    """
+    global _recall_counts_cache, _recall_counts_ts
+    now = time.time()
+    if (
+        not force_refresh
+        and _recall_counts_cache is not None
+        and (now - _recall_counts_ts) < _RECALL_COUNTS_TTL_S
+    ):
+        return _recall_counts_cache
+
+    counts: dict[str, int] = {}
+    for rec in iter_logs(since_days=days):
+        ev = rec.get("event")
+        if ev == "search":
+            for hid in rec.get("hits") or []:
+                if hid:
+                    counts[hid] = counts.get(hid, 0) + 1
+        elif ev == "read":
+            mid = rec.get("id")
+            if mid:
+                counts[mid] = counts.get(mid, 0) + 2
+    _recall_counts_cache = counts
+    _recall_counts_ts = now
+    return counts
 
 
 # ==================== 自动衰减 ====================
