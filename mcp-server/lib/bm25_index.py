@@ -100,7 +100,7 @@ def _fast_fingerprint(scope_path: Path) -> int:
         if (now - ts) < _FINGERPRINT_TTL_S:
             return fp
 
-    files = list(scope_path.rglob("*.md"))
+    files = [f for f in scope_path.rglob("*.md") if "_compiled" not in f.parts]
     if not files:
         fp = 0
         _fingerprint_cache[scope_str] = (now, fp)
@@ -148,7 +148,7 @@ def get_index(scope_path: Path) -> BM25Index | None:
         if cached_fp == fp:
             return cached_idx
 
-    files = sorted(scope_path.rglob("*.md"))
+    files = sorted(f for f in scope_path.rglob("*.md") if "_compiled" not in f.parts)
     if not files:
         return None
     documents = [tokenize(_read_body(f)) for f in files]
