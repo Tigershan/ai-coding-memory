@@ -296,6 +296,17 @@ def save(memory: Memory, *, allow_overwrite_protected: bool = False,
     _atomic_write(target, text)
     memory._mtime_at_write = actual_mtime
     memory.file_path = target
+
+    # 编译层 stale 标记：scope=project 写入后通知编译层需要刷新
+    if memory.scope == "project" and memory.project_key:
+        try:
+            from .paths import stale_marker_path
+            marker = stale_marker_path(memory.project_key)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(time.time()), encoding="utf-8")
+        except Exception:
+            pass
+
     return target
 
 
