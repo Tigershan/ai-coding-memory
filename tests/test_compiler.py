@@ -96,3 +96,130 @@ def test_save_personal_does_not_mark_stale(tmp_path, monkeypatch):
 
     stale_files = list((tmp_path / "projects").rglob(".stale"))
     assert len(stale_files) == 0, "personal scope 不应创建 .stale 标记"
+
+
+# ==================== Task 5: 编译引擎 ====================
+
+_PROJECT_KEY = "gitlab.example.com/org/repo"
+
+
+def _make_project_dir(tmp_path, monkeypatch):
+    """创建带 monkeypatch 的项目目录，返回 project_dir"""
+    _patch_dirs(tmp_path, monkeypatch)
+    from core.project_key import _to_dir_name
+    project_dir = tmp_path / "projects" / _to_dir_name(_PROJECT_KEY)
+    project_dir.mkdir(parents=True)
+    return project_dir
+
+
+def _write_mem(project_dir, mem_id, title, value="high", body_extra=""):
+    (project_dir / f"{mem_id}.md").write_text(
+        f"---\nid: {mem_id}\nscope: project\nproject_key: {_PROJECT_KEY}\n"
+        f"source: auto\nvalue: {value}\ncreated: 2026-06-01\nupdated: 2026-06-01\n"
+        f"tags: [test]\n_mtime_at_write: 0\n---\n"
+        f"# {title}\n\n## 结论\n{title} content\n{body_extra}"
+    )
+
+
+class FakeProvider:
+    def is_synchronous(self):
+        return True
+    def run(self, prompt, *, system=""):
+        return "# Test 项目知识总览\n\n> 自动编译\n\n## 核心约定\n- compiled result\n"
+
+
+def test_build_compile_prompt_includes_all_entries(tmp_path, monkeypatch):
+    """build_compile_prompt 应包含所有 memory 条目，按 value 排序"""
+    project_dir = _make_project_dir(tmp_path, monkeypatch)
+    _write_mem(project_dir, "mem-high-0001", "Redis 连接池配置", "high")
+    _write_mem(project_dir, "mem-low-0002", "调试日志", "low")
+
+    from core.compiler import build_compile_prompt
+    prompt = build_compile_prompt(_PROJECT_KEY)
+    assert "Redis 连接池配置" in prompt
+    assert "调试日志" in prompt
+    assert "mem-high-0001" in prompt
+    assert prompt.index("Redis 连接池配置") < prompt.index("调试日志")
+
+
+def test_compile_writes_overview(tmp_path, monkeypatch):
+    """compile_project 应写入 _compiled/overview.md 并删除 .stale"""
+    project_dir = _make_project_dir(tmp_path, monkeypatch)
+    _write_mem(project_dir, "mem-0001", "Test Memory")
+
+    comp = project_dir / "_compiled"
+    comp.mkdir()
+    (comp / ".stale").write_text("1234567890")
+
+    from core.compiler import compile_project
+    result = compile_project(_PROJECT_KEY, llm_provider=FakeProvider())
+    assert result is not None
+    assert (comp / "overview.md").exists()
+    assert not (comp / ".stale").exists()
+    content = (comp / "overview.md").read_text()
+    assert "项目知识总览" in content
+
+
+def test_compile_skips_edited_overview(tmp_path, monkeypatch):
+    """overview.md 已被人编辑（source: edited）时应跳过不覆盖"""
+    project_dir = _make_project_dir(tmp_path, monkeypatch)
+    _write_mem(project_dir, "mem-0001", "Test Memory")
+
+    comp = project_dir / "_compiled"
+    comp.mkdir()
+    (comp / "overview.md").write_text(
+        "---\nsource: edited\n_mtime_at_write: 0\n---\n# 我手动编辑过的总览\n自定义内容\n"
+    )
+    (comp / ".stale").write_text("1234567890")
+
+    from core.compiler import compile_project
+    result = compile_project(_PROJECT_KEY, llm_provider=FakeProvider())
+    assert result is None
+    content = (comp / "overview.md").read_text()
+    assert "我手动编辑过的总览" in content
+
+
+def test_compile_no_memories_returns_none(tmp_path, monkeypatch):
+    """项目无 memory 时 compile_project 返回 None"""
+    project_dir = _make_project_dir(tmp_path, monkeypatch)
+
+    from core.compiler import compile_project
+    result = compile_project(_PROJECT_KEY, llm_provider=None)
+    assert result is None
+
+
+def test_read_compiled_overview(tmp_path, monkeypatch):
+    """read_compiled_overview 读取已编译文档正文"""
+    project_dir = _make_project_dir(tmp_path, monkeypatch)
+    comp = project_dir / "_compiled"
+    comp.mkdir()
+    (comp / "overview.md").write_text(
+        "---\nsource: compiled\n_mtime_at_write: 0\n---\n# 项目总览\n内容段落\n"
+    )
+
+    from core.compiler import read_compiled_overview
+    body = read_compiled_overview(_PROJECT_KEY)
+    assert body is not None
+    assert "项目总览" in body
+    assert "内容段落" in body
+
+
+def test_read_compiled_overview_returns_none_when_missing(tmp_path, monkeypatch):
+    """无 overview.md 时返回 None"""
+    _make_project_dir(tmp_path, monkeypatch)
+
+    from core.compiler import read_compiled_overview
+    assert read_compiled_overview(_PROJECT_KEY) is None
+
+
+def test_is_stale(tmp_path, monkeypatch):
+    """is_stale 检测 .stale 标记"""
+    project_dir = _make_project_dir(tmp_path, monkeypatch)
+
+    from core.compiler import is_stale
+    assert not is_stale(_PROJECT_KEY)
+
+    comp = project_dir / "_compiled"
+    comp.mkdir()
+    (comp / ".stale").write_text("1")
+    assert is_stale(_PROJECT_KEY)
