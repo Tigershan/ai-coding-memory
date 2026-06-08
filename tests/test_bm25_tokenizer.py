@@ -59,3 +59,28 @@ def test_chinese_word_boundaries():
     """分词应尊重词边界"""
     out = tokenize("连接池配置文件")
     assert any("连接" in t for t in out)
+
+
+from lib.searcher import _grep_snippet
+
+
+def test_grep_snippet_exact_match():
+    text = "line1\nRedis 连接池配置\nline3"
+    result = _grep_snippet("连接池配置", text, context_lines=1)
+    assert result is not None
+    assert result["line"] == 2
+
+
+def test_grep_snippet_individual_words():
+    """多词查询应匹配包含任意单词的行"""
+    text = "line1\n这是 Redis 的配置\n连接池参数在这里\nline4"
+    result = _grep_snippet("Redis 连接池 配置", text, context_lines=1)
+    assert result is not None
+    # 应匹配到第一个包含 query 中某个词的行
+    assert result["line"] in (2, 3)
+
+
+def test_grep_snippet_no_match():
+    text = "line1\nfoo bar\nline3"
+    result = _grep_snippet("completely unrelated", text, context_lines=1)
+    assert result is None

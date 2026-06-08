@@ -263,9 +263,14 @@ def _extract_h1(body: str) -> str:
 
 
 def _grep_snippet(query: str, text: str, *, context_lines: int) -> dict | None:
-    """找第一处字面命中，抽 ±context_lines 上下文"""
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    """找第一处字面命中，抽 ±context_lines 上下文。
+
+    先尝试完整 query 匹配；失败则按空格拆词，找包含最多 query 词的行。
+    """
     lines = text.splitlines()
+
+    # 1) 完整 query 匹配
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
     for idx, line in enumerate(lines):
         if pattern.search(line):
             ctx_start = max(0, idx - context_lines)
@@ -274,7 +279,27 @@ def _grep_snippet(query: str, text: str, *, context_lines: int) -> dict | None:
                 "line": idx + 1,
                 "snippet": "\n".join(lines[ctx_start:ctx_end]),
             }
-    return None
+
+    # 2) 按词拆分匹配：找包含最多 query 词的行
+    words = [w for w in re.split(r"\s+", query.strip()) if len(w) >= 2]
+    if not words:
+        return None
+    word_patterns = [re.compile(re.escape(w), re.IGNORECASE) for w in words]
+    best_idx = -1
+    best_count = 0
+    for idx, line in enumerate(lines):
+        count = sum(1 for p in word_patterns if p.search(line))
+        if count > best_count:
+            best_count = count
+            best_idx = idx
+    if best_count == 0:
+        return None
+    ctx_start = max(0, best_idx - context_lines)
+    ctx_end = min(len(lines), best_idx + context_lines + 1)
+    return {
+        "line": best_idx + 1,
+        "snippet": "\n".join(lines[ctx_start:ctx_end]),
+    }
 
 
 def _head_snippet(body: str, lines_n: int) -> dict:
