@@ -37,14 +37,27 @@ DEFAULT_MAX_SIZE = 4096
 
 
 def build_summary(project_key: str, *, max_size: int = DEFAULT_MAX_SIZE) -> str:
-    """从 projects/<key>/*.md 抽取一段摘要
+    """从 projects/<key>/ 抽取摘要。优先使用 _compiled/overview.md（如存在）。
 
-    挑选规则（按优先级）：
+    回退规则（无编译层时）：
       1. source ∈ {manual, edited}
       2. value=high
       3. value=medium
     每条只取一行：- **title** — summary 或 摘要（首段 < 100 字）
     """
+    from .compiler import read_compiled_overview
+    compiled = read_compiled_overview(project_key)
+    if compiled:
+        header = (
+            f"## 📚 项目知识总览 (auto-compiled by ai-coding-memory)\n\n"
+            f"> 来源：~/.ai-memory/projects/{_to_dir_name(project_key)}/_compiled/overview.md\n"
+            f"> Project: {project_key}\n\n"
+        )
+        body = header + compiled
+        if len(body) > max_size:
+            body = body[:max_size - 20] + "\n\n... (truncated)"
+        return body
+
     mems = ms.list_memories(scope="project", project_key=project_key)
     if not mems:
         return ""
