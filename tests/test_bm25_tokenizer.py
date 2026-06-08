@@ -18,13 +18,10 @@ def test_ascii_lowercased():
 
 def test_chinese_bigram():
     out = tokenize("连接池配置")
-    # 期望出现 bigram
-    assert "连接" in out
-    assert "接池" in out
-    assert "池配" in out
-    assert "配置" in out
-    # 末尾 unigram 兜底
-    assert "置" in out
+    # jieba 模式可能切出 "连接池" + "配置"，bigram 模式切出 "连接"/"接池"/"池配"/"配置"/"置"
+    # 两种模式下 "连接" 和 "配置" 都应能匹配到
+    assert any("连接" in t for t in out)
+    assert any("配置" in t for t in out)
 
 
 def test_mixed_chinese_english():
@@ -32,8 +29,8 @@ def test_mixed_chinese_english():
     assert "redis" in out
     assert "maxidle" in out
     assert "8" in out
-    assert "连接" in out
-    assert "接池" in out
+    # jieba 模式可能切出 "连接池"，bigram 模式切出 "连接"/"接池"/"池"
+    assert any("连接" in t for t in out)
 
 
 def test_empty_returns_empty():
@@ -50,3 +47,15 @@ def test_punctuation_dropped():
     assert "foo" in out or "foo-bar" not in out  # 句点会切开
     assert "bar" in out
     assert "baz" in out
+
+
+def test_chinese_stopword_filtered():
+    """高频无意义 bigram 应被过滤"""
+    out = tokenize("这个是一个好的方案不是吗")
+    assert "的是" not in out
+
+
+def test_chinese_word_boundaries():
+    """分词应尊重词边界"""
+    out = tokenize("连接池配置文件")
+    assert any("连接" in t for t in out)

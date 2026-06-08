@@ -2,7 +2,7 @@
 
 替代原 searcher 的 substring grep 评分：
     - rank_bm25.BM25Okapi 提供 idf + 文档长度归一
-    - tokenizer 同时切 ASCII 词与 CJK 字符 bigram，无需新依赖
+    - tokenizer 切 ASCII 词 + CJK 分词（jieba 优先，bigram+停用词兜底）
     - 索引 key = (scope_path, hash([(rel_path, mtime), ...]))；
       任一文件 mtime 变化即整体重建（< 1k 文件级别开销可忽略）
 
@@ -28,29 +28,23 @@ try:
 except ImportError:
     _HAS_BM25 = False
 
+from .cjk_tokenizer import tokenize_cjk
 
 # ASCII 词 + 数字 + 下划线 / 连字符
 _WORD_RE = re.compile(r"[A-Za-z0-9_\-]+")
-# CJK 字符（中日韩统一表意）
-_CJK_RE = re.compile(r"[一-鿿]")
 
 
 def tokenize(text: str) -> list[str]:
-    """切 ASCII 词 + CJK bigram。
+    """切 ASCII 词 + CJK 分词（jieba 优先，bigram+停用词兜底）。
 
-    例如 "Redis 连接池 maxIdle" → ["redis", "maxidle", "连接", "接池", "池", ...]
+    例如 "Redis 连接池 maxIdle" → ["redis", "maxidle", "连接池", ...]  (jieba)
+    或   "Redis 连接池 maxIdle" → ["redis", "maxidle", "连接", "接池", "池"]  (bigram)
     """
     if not text:
         return []
     text_low = text.lower()
     tokens: list[str] = list(_WORD_RE.findall(text_low))
-    cjk_chars: list[str] = _CJK_RE.findall(text)
-    # bigram；最后一个单字也作为 unigram 保留以提高短词召回
-    if len(cjk_chars) == 1:
-        tokens.append(cjk_chars[0])
-    elif len(cjk_chars) > 1:
-        tokens.extend(cjk_chars[i] + cjk_chars[i + 1] for i in range(len(cjk_chars) - 1))
-        tokens.append(cjk_chars[-1])
+    tokens.extend(tokenize_cjk(text))
     return tokens
 
 
