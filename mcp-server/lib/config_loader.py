@@ -40,9 +40,9 @@ _DEFAULTS = {
     # 时间衰减（仅作用于 source ∈ {auto, bootstrap}）
     "time_decay_half_life_days": 90,
     "time_decay_floor": 0.5,
-    # 向量重排（默认关；需 pip install '.[vector]'）
-    "vector_rerank_enabled": False,
-    "vector_rerank_model": "BAAI/bge-small-en-v1.5",
+    # 向量重排（默认开；需 pip install '.[vector]'）
+    "vector_rerank_enabled": True,
+    "vector_rerank_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
     "vector_rerank_top_n": 50,
     "vector_rerank_bm25_weight": 0.3,
 }

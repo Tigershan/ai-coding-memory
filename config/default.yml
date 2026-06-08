@@ -44,9 +44,10 @@ mcp_server:
   time_decay_half_life_days: 90
   time_decay_floor: 0.5
 
-  # —— 本地向量重排（默认关；启用前请 pip install '.[vector]'）——
-  vector_rerank_enabled: false
-  vector_rerank_model: BAAI/bge-small-en-v1.5
+  # —— 本地向量重排（默认开；首次使用自动下载模型 ~120MB）——
+  # 关闭请设 vector_rerank_enabled: false 或 uninstall fastembed
+  vector_rerank_enabled: true
+  vector_rerank_model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
   # BM25 取 top_n 后送入向量重排
   vector_rerank_top_n: 50
   # 最终分 = bm25_weight * bm25_norm + (1 - bm25_weight) * cosine

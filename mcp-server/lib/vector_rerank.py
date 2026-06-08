@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.paths import DATA_ROOT  # noqa: E402
+
+_logger = logging.getLogger("ai-memory.vector-rerank")
 
 CACHE_DIR = DATA_ROOT / ".cache" / "embed-index"
 
@@ -52,6 +55,10 @@ def _lazy_load() -> bool:
         import numpy as np  # type: ignore
     except ImportError:
         _HAS_DEPS = False
+        _logger.warning(
+            "向量重排已在配置中启用但 fastembed/numpy 未安装。"
+            "召回将退化为纯 BM25。请执行: pip install 'ai-coding-memory-mcp-server[vector]'"
+        )
         return False
     _TextEmbedding = TextEmbedding
     _np = np
