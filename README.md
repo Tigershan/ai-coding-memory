@@ -1,7 +1,7 @@
 # ai-coding-memory
 
 > 跨 coding agent 的个人 / 项目 memory。
-> 你和 AI 说过的每一句话都不会白费 —— 跨 agent 共享，永久可召回，永远可改。
+> 你和 AI 说过的每一句话都不会白费 —— 让开发经验跨会话、跨 Agent、跨开发者持续流动。
 
 把每天与 **Cursor / Claude Code / Qoder** 的对话，自动沉淀成可读、可改、可召回的 markdown 笔记——任意 IDE 都能搜到。
 
