@@ -12,7 +12,11 @@ venv/
 # ---- IDE ----
 .idea/
 .vscode/
-.claude/              # Claude Code workspace local state
+.claude/
+.cursor/
+.qoder/
+.aone_copilot/
+__MACOSX/
 *.swp
 *.swo
 .DS_Store
